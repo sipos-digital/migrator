@@ -78,16 +78,53 @@ class Migrator_Importer {
 			throw new RuntimeException( __( 'Could not open archive.', 'migrator' ) );
 		}
 
-		$manifest_raw = $zip->getFromName( Migrator_Exporter::MANIFEST_FILE );
-		if ( false === $manifest_raw ) {
-			$zip->close();
-			throw new RuntimeException( __( 'Archive is missing migrator-manifest.json.', 'migrator' ) );
+		// Locate the manifest. It may be at the archive root (our own exports) or
+		// nested under a wrapper directory if the archive was re-zipped by macOS
+		// Finder (which also adds a __MACOSX/ resource fork tree).
+		$manifest_name = null;
+		for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+			$entry = $zip->getNameIndex( $i );
+			if ( false === $entry ) {
+				continue;
+			}
+			if ( 0 === strpos( $entry, '__MACOSX/' ) ) {
+				continue;
+			}
+			if ( basename( $entry ) === Migrator_Exporter::MANIFEST_FILE ) {
+				$manifest_name = $entry;
+				break;
+			}
 		}
-		$manifest = json_decode( $manifest_raw, true );
+
+		if ( null === $manifest_name ) {
+			$contents = array();
+			$count    = min( 30, $zip->numFiles );
+			for ( $i = 0; $i < $count; $i++ ) {
+				$contents[] = $zip->getNameIndex( $i );
+			}
+			$more = $zip->numFiles > $count ? sprintf( ' (and %d more)', $zip->numFiles - $count ) : '';
+			$zip->close();
+			throw new RuntimeException(
+				sprintf(
+					/* translators: 1: list of archive entries, 2: '… and N more' suffix or empty */
+					__( 'Archive is missing migrator-manifest.json. The archive contains: %1$s%2$s. This usually means the archive was created by a different tool, or by an older version of Migrator (pre-0.2.1) that did not write the manifest correctly. Re-export the source site with this plugin version and try again.', 'migrator' ),
+					implode( ', ', $contents ) ?: '(no entries)',
+					$more
+				)
+			);
+		}
+
+		$manifest_raw = $zip->getFromName( $manifest_name );
+		$manifest     = json_decode( $manifest_raw, true );
 		if ( ! is_array( $manifest ) || empty( $manifest['site_url'] ) ) {
 			$zip->close();
 			throw new RuntimeException( __( 'Manifest is invalid.', 'migrator' ) );
 		}
+
+		// Prefix = wrapper directory inside the zip (empty string for archives
+		// produced by Migrator itself; "migrator-foo-20260522-202439/" for
+		// archives re-zipped by macOS Finder).
+		$archive_prefix = substr( $manifest_name, 0, -strlen( Migrator_Exporter::MANIFEST_FILE ) );
 
 		$total_entries = $zip->numFiles;
 		$zip->close();
@@ -98,6 +135,7 @@ class Migrator_Importer {
 		$data = $this->job->state['data'];
 		$data['manifest']        = $manifest;
 		$data['extract_dir']     = $extract_dir;
+		$data['archive_prefix']  = $archive_prefix;
 		$data['total_entries']   = $total_entries;
 		$data['entry_index']     = 0;
 		$data['sql_offset']      = 0;
@@ -129,10 +167,15 @@ class Migrator_Importer {
 		$entries   = array();
 		while ( $processed < self::FILE_BATCH && ( $entry_index + $processed ) < $total_entries ) {
 			$name = $zip->getNameIndex( $entry_index + $processed );
-			if ( false !== $name ) {
-				$entries[] = $name;
-			}
 			$processed++;
+			if ( false === $name ) {
+				continue;
+			}
+			// Skip macOS resource forks and Finder metadata — they're never useful.
+			if ( 0 === strpos( $name, '__MACOSX/' ) || '.DS_Store' === basename( $name ) ) {
+				continue;
+			}
+			$entries[] = $name;
 		}
 
 		if ( ! empty( $entries ) && ! $zip->extractTo( $data['extract_dir'], $entries ) ) {
@@ -157,7 +200,16 @@ class Migrator_Importer {
 	}
 
 	private function after_extract( array $data ): void {
-		$sql_file = $data['extract_dir'] . '/' . Migrator_Exporter::DB_FILE;
+		// Archives re-zipped by macOS Finder land everything under a wrapper
+		// directory inside the extract dir. Resolve through that wrapper if
+		// present so the subsequent phases see the same layout regardless.
+		$base = $data['extract_dir'];
+		if ( ! empty( $data['archive_prefix'] ) ) {
+			$base = trailingslashit( $base ) . rtrim( $data['archive_prefix'], '/' );
+		}
+		$data['archive_base'] = $base;
+
+		$sql_file = $base . '/' . Migrator_Exporter::DB_FILE;
 		if ( file_exists( $sql_file ) ) {
 			// Apply URL rewriting once, in-place.
 			$manifest  = (array) $data['manifest'];
@@ -178,7 +230,7 @@ class Migrator_Importer {
 	private function phase_db_restore(): void {
 		global $wpdb;
 		$data       = $this->job->state['data'];
-		$sql_file   = $data['extract_dir'] . '/' . Migrator_Exporter::DB_FILE;
+		$sql_file   = ( $data['archive_base'] ?? $data['extract_dir'] ) . '/' . Migrator_Exporter::DB_FILE;
 		$sql_total  = (int) $data['sql_total'];
 		$sql_offset = (int) $data['sql_offset'];
 
@@ -236,7 +288,7 @@ class Migrator_Importer {
 	}
 
 	private function prepare_files_copy_phase( array $data ): void {
-		$copy_map = $this->build_copy_map( $data['extract_dir'] );
+		$copy_map = $this->build_copy_map( $data['archive_base'] ?? $data['extract_dir'] );
 		file_put_contents( $this->job->files_list_path(), implode( "\n", $copy_map['lines'] ) );
 		$data['total_copy'] = $copy_map['count'];
 		$data['file_index'] = 0;
@@ -313,7 +365,7 @@ class Migrator_Importer {
 		$this->job->update_progress( 1.0, __( 'Import complete', 'migrator' ), 1.0 );
 	}
 
-	private function build_copy_map( string $extract_dir ): array {
+	private function build_copy_map( string $extract_base ): array {
 		// Map each top-level directory in extract/ to its destination on disk.
 		$destinations = array(
 			'uploads'    => wp_upload_dir()['basedir'],
@@ -324,7 +376,7 @@ class Migrator_Importer {
 
 		$lines = array();
 		foreach ( $destinations as $label => $dest_root ) {
-			$source_root = $extract_dir . '/' . $label;
+			$source_root = $extract_base . '/' . $label;
 			if ( ! is_dir( $source_root ) ) {
 				continue;
 			}
@@ -337,6 +389,10 @@ class Migrator_Importer {
 					continue;
 				}
 				$absolute = $file->getPathname();
+				// Skip macOS resource forks if they slipped past the extract filter.
+				if ( '.DS_Store' === $file->getBasename() || false !== strpos( $absolute, '/__MACOSX/' ) ) {
+					continue;
+				}
 				$relative = ltrim( str_replace( '\\', '/', substr( $absolute, strlen( $source_root ) ) ), '/' );
 				$lines[]  = $absolute . '|' . trailingslashit( $dest_root ) . $relative;
 			}

@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.4
+Stable tag: 0.2.5
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.5 =
+* Fix: import accepts archives that were re-zipped by macOS Finder. Finder's "Compress" wraps everything in a single directory named after the archive and adds a __MACOSX/ resource fork tree, which previously caused "Archive is missing migrator-manifest.json". The importer now locates the manifest anywhere in the archive, detects the wrapper prefix, and strips it (plus __MACOSX/ and .DS_Store entries) on extract and copy.
+* Better error message when the manifest is genuinely missing: lists up to 30 archive entries so you can see what was actually uploaded.
 
 = 0.2.4 =
 * Fix: import chunk size now derives from `post_max_size` / `upload_max_filesize` (with a 30% safety margin for FormData overhead) instead of a hard-coded 5 MB, which exceeded the default PHP limit of 2 MB and made every upload fail with a PHP warning that surfaced in Safari as a generic "string did not match the expected pattern" error.

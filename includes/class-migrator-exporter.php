@@ -312,8 +312,13 @@ class Migrator_Exporter {
 			'table_prefix'   => $GLOBALS['wpdb']->prefix,
 			'profile'        => $this->job->profile->to_array(),
 		);
-		$zip->addFromString( self::MANIFEST_FILE, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) );
-		$zip->close();
+		if ( ! $zip->addFromString( self::MANIFEST_FILE, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) ) ) {
+			$zip->close();
+			throw new RuntimeException( __( 'Could not add migrator-manifest.json to archive.', 'migrator' ) );
+		}
+		if ( ! $zip->close() ) {
+			throw new RuntimeException( __( 'Could not finalize archive.', 'migrator' ) );
+		}
 
 		// Remove intermediate database.sql; it's already in the zip.
 		if ( file_exists( $this->job->sql_path() ) ) {
