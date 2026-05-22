@@ -5,9 +5,66 @@
 	'use strict';
 
 	const cfg = window.MigratorConfig || {};
+	// Fall back to WordPress's global ajaxurl if our localized config is missing it.
+	if (!cfg.ajaxUrl) {
+		cfg.ajaxUrl = window.ajaxurl || '/wp-admin/admin-ajax.php';
+	}
+	if (!cfg.pollMs) cfg.pollMs = 250;
+	if (!cfg.chunkKb) cfg.chunkKb = 5120;
+	if (!cfg.i18n) cfg.i18n = {};
+
+	console.log('[Migrator] script loaded. ajaxUrl =', cfg.ajaxUrl, ' nonce set:', !!cfg.nonce);
+
+	// Surface anything that escapes our try/catch blocks — usually a third-party
+	// admin script or an unhandled async rejection on this page.
+	window.addEventListener('error', (event) => {
+		if (event && (event.filename || '').indexOf('migrator') !== -1) {
+			console.error('[Migrator window.error]', event.message, event.error || '', event.filename + ':' + event.lineno + ':' + event.colno);
+		}
+	});
+	window.addEventListener('unhandledrejection', (event) => {
+		console.error('[Migrator unhandledrejection]', event.reason);
+	});
 
 	function $(sel, root) {
 		return (root || document).querySelector(sel);
+	}
+
+	function ajaxFetch(action, body) {
+		console.log('[Migrator] →', action, cfg.ajaxUrl);
+		let response;
+		try {
+			response = fetch(cfg.ajaxUrl, { method: 'POST', body, credentials: 'same-origin' });
+		} catch (syncErr) {
+			// Some browsers throw synchronously from fetch() if the URL is malformed.
+			console.error('[Migrator] fetch threw synchronously for', action, 'url=', cfg.ajaxUrl, syncErr);
+			return Promise.reject(new Error('Network error (' + action + '): ' + syncErr.message));
+		}
+		return response
+			.catch((networkErr) => {
+				console.error('[Migrator] network error for', action, 'url=', cfg.ajaxUrl, networkErr);
+				throw new Error('Network error (' + action + '): ' + networkErr.message);
+			})
+			.then((r) => {
+				console.log('[Migrator] ← ' + action, 'HTTP', r.status, r.headers.get('content-type'));
+				return r.text().then((text) => {
+					try {
+						return JSON.parse(text);
+					} catch (parseErr) {
+						console.error('[Migrator] JSON parse failed for', action, 'body was:', text.slice(0, 500), parseErr);
+						throw new Error('Invalid server response (' + action + '): ' + parseErr.message);
+					}
+				});
+			})
+			.then((json) => {
+				if (!json || !json.success) {
+					const msg = (json && json.data && json.data.message) || cfg.i18n.failed || 'Request failed';
+					const err = new Error(msg);
+					err.snapshot = json && json.data && json.data.snapshot;
+					throw err;
+				}
+				return json.data;
+			});
 	}
 
 	function postForm(action, params) {
@@ -21,17 +78,7 @@
 				body.append(k, v);
 			}
 		});
-		return fetch(cfg.ajaxUrl, { method: 'POST', body, credentials: 'same-origin' })
-			.then((r) => r.json())
-			.then((json) => {
-				if (!json.success) {
-					const msg = (json.data && json.data.message) || cfg.i18n.failed;
-					const err = new Error(msg);
-					err.snapshot = json.data && json.data.snapshot;
-					throw err;
-				}
-				return json.data;
-			});
+		return ajaxFetch(action, body);
 	}
 
 	function postChunk(action, params, fileBlob) {
@@ -41,14 +88,7 @@
 		Object.entries(params || {}).forEach(([k, v]) => body.append(k, v));
 		// Third argument supplies a filename so $_FILES['chunk']['name'] is set on every host.
 		body.append('chunk', fileBlob, 'chunk.bin');
-		return fetch(cfg.ajaxUrl, { method: 'POST', body, credentials: 'same-origin' })
-			.then((r) => r.json())
-			.then((json) => {
-				if (!json.success) {
-					throw new Error((json.data && json.data.message) || cfg.i18n.failed);
-				}
-				return json.data;
-			});
+		return ajaxFetch(action, body);
 	}
 
 	function setProgress(scope, snapshot) {

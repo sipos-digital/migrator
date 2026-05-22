@@ -18,7 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 			<tr>
 				<th scope="row"><label for="migrator_archive"><?php esc_html_e( 'Archive (.zip)', 'migrator' ); ?></label></th>
 				<td>
-					<input type="file" id="migrator_archive" name="migrator_archive" accept=".zip,application/zip" />
+					<input type="file" id="migrator_archive" name="migrator_archive" />
 				</td>
 			</tr>
 			<tr>

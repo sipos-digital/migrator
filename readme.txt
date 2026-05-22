@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.2
+Stable tag: 0.2.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.3 =
+* Diagnostics: log every AJAX request/response to the console (URL, action, HTTP status, content-type); register a global error/unhandledrejection listener; wrap fetch in try/catch with action-specific error messages so the failing step is visible.
+* Defensive: fall back to `window.ajaxurl` if `MigratorConfig.ajaxUrl` is missing; drop the `accept` filter on the file input in case Safari's MIME-handling triggers spurious validation.
 
 = 0.2.2 =
 * Fix: "The string did not match the expected pattern." on import — caused by Safari's native HTML5 validation on the `type=url` field, which fires before our submit handler and cannot be cancelled by preventDefault. Switched the New Site URL field to `type=text`, added `novalidate` to both forms, and moved required-file checks to JS so we can show our own messages.
