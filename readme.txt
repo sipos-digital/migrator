@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.3
+Stable tag: 0.2.4
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,11 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.4 =
+* Fix: import chunk size now derives from `post_max_size` / `upload_max_filesize` (with a 30% safety margin for FormData overhead) instead of a hard-coded 5 MB, which exceeded the default PHP limit of 2 MB and made every upload fail with a PHP warning that surfaced in Safari as a generic "string did not match the expected pattern" error.
+* When the server still rejects a chunk for being too large (HTML "POST Content-Length exceeds the limit" warning), the importer now shows a clear message about raising PHP limits instead of a cryptic JSON parse error.
+* MigratorConfig now exposes `postMax`, `uploadMax`, and `chunkBytes` for debugging.
 
 = 0.2.3 =
 * Diagnostics: log every AJAX request/response to the console (URL, action, HTTP status, content-type); register a global error/unhandledrejection listener; wrap fetch in try/catch with action-specific error messages so the failing step is visible.

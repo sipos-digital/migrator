@@ -10,10 +10,14 @@
 		cfg.ajaxUrl = window.ajaxurl || '/wp-admin/admin-ajax.php';
 	}
 	if (!cfg.pollMs) cfg.pollMs = 250;
-	if (!cfg.chunkKb) cfg.chunkKb = 5120;
+	if (!cfg.chunkBytes) cfg.chunkBytes = 1048576; // 1 MB fallback if server didn't tell us.
 	if (!cfg.i18n) cfg.i18n = {};
 
-	console.log('[Migrator] script loaded. ajaxUrl =', cfg.ajaxUrl, ' nonce set:', !!cfg.nonce);
+	console.log('[Migrator] script loaded. ajaxUrl =', cfg.ajaxUrl,
+		' chunkBytes =', cfg.chunkBytes,
+		' postMax =', cfg.postMax,
+		' uploadMax =', cfg.uploadMax,
+		' nonce set:', !!cfg.nonce);
 
 	// Surface anything that escapes our try/catch blocks — usually a third-party
 	// admin script or an unhandled async rejection on this page.
@@ -52,6 +56,12 @@
 						return JSON.parse(text);
 					} catch (parseErr) {
 						console.error('[Migrator] JSON parse failed for', action, 'body was:', text.slice(0, 500), parseErr);
+						// Detect the most common cause of an HTML response: PHP rejecting
+						// the request body up-front because it exceeds post_max_size. Show
+						// a friendlier message than 'Unrecognized token <'.
+						if (/POST Content-Length of \d+ bytes exceeds the limit/i.test(text)) {
+							throw new Error(cfg.i18n.postTooLarge || 'Upload chunk exceeds PHP post_max_size.');
+						}
 						throw new Error('Invalid server response (' + action + '): ' + parseErr.message);
 					}
 				});
@@ -231,8 +241,9 @@
 				const startData = await postForm('migrator_import_start', { new_url: newUrl });
 				activeJobId = startData.job_id;
 
-				// Chunked upload.
-				const chunkSize = cfg.chunkKb * 1024;
+				// Chunked upload. Chunk size is derived server-side from
+				// PHP's post_max_size / upload_max_filesize so it always fits.
+				const chunkSize = cfg.chunkBytes;
 				const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
 				for (let i = 0; i < totalChunks; i++) {
 					if (cancelled) return;

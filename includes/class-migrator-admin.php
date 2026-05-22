@@ -64,15 +64,23 @@ class Migrator_Admin {
 			true
 		);
 
+		$post_max   = self::ini_bytes( 'post_max_size' );
+		$upload_max = self::ini_bytes( 'upload_max_filesize' );
+		$limit      = min( array_filter( array( $post_max, $upload_max ) ) ) ?: 2097152;
+		// Reserve ~30% of the limit for FormData overhead (boundaries, fields, headers).
+		$chunk_bytes = max( 262144, (int) ( $limit * 0.7 ) );
+
 		wp_localize_script(
 			'migrator-admin',
 			'MigratorConfig',
 			array(
-				'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
-				'nonce'    => wp_create_nonce( Migrator_Ajax::NONCE ),
-				'chunkKb'  => 5120, // 5 MB upload chunks
-				'pollMs'   => 250,
-				'i18n'     => array(
+				'ajaxUrl'    => admin_url( 'admin-ajax.php' ),
+				'nonce'      => wp_create_nonce( Migrator_Ajax::NONCE ),
+				'chunkBytes' => $chunk_bytes,
+				'postMax'    => $post_max,
+				'uploadMax'  => $upload_max,
+				'pollMs'     => 250,
+				'i18n'       => array(
 					'starting'       => __( 'Starting…', 'migrator' ),
 					'cancelled'      => __( 'Cancelled.', 'migrator' ),
 					'failed'         => __( 'Failed', 'migrator' ),
@@ -81,9 +89,18 @@ class Migrator_Admin {
 					'noInclusion'    => __( 'Select at least one thing to include.', 'migrator' ),
 					'noFile'         => __( 'Please choose an archive to import.', 'migrator' ),
 					'uploadComplete' => __( 'Upload complete', 'migrator' ),
+					'postTooLarge'   => __( 'The server rejected the upload chunk because it exceeds PHP\'s post_max_size. Increase post_max_size / upload_max_filesize in php.ini and try again.', 'migrator' ),
 				),
 			)
 		);
+	}
+
+	private static function ini_bytes( string $key ): int {
+		$value = (string) ini_get( $key );
+		if ( '' === $value ) {
+			return 0;
+		}
+		return function_exists( 'wp_convert_hr_to_bytes' ) ? (int) wp_convert_hr_to_bytes( $value ) : (int) $value;
 	}
 
 	public static function render_dashboard() {
