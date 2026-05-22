@@ -79,6 +79,7 @@ class Migrator_Admin {
 					'confirmCancel'  => __( 'Cancel this job?', 'migrator' ),
 					'confirmImport'  => __( 'This will overwrite the database and files of this site. Continue?', 'migrator' ),
 					'noInclusion'    => __( 'Select at least one thing to include.', 'migrator' ),
+					'noFile'         => __( 'Please choose an archive to import.', 'migrator' ),
 					'uploadComplete' => __( 'Upload complete', 'migrator' ),
 				),
 			)

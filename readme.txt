@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.1
+Stable tag: 0.2.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.2 =
+* Fix: "The string did not match the expected pattern." on import — caused by Safari's native HTML5 validation on the `type=url` field, which fires before our submit handler and cannot be cancelled by preventDefault. Switched the New Site URL field to `type=text`, added `novalidate` to both forms, and moved required-file checks to JS so we can show our own messages.
+* Defensive: send a filename ("chunk.bin") with each upload chunk so `$_FILES['chunk']['name']` is populated on hosts that require it. Log uncaught import/export errors to the console for easier debugging.
 
 = 0.2.1 =
 * Fix: "Could not open archive to append database." — the empty zip created in the init phase was not written to disk by PHP's ZipArchive (a known PHP quirk on empty archives), so the next phase had nothing to open. Archive is now created lazily on the first append using the CREATE flag.

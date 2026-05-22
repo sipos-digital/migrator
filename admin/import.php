@@ -13,19 +13,19 @@ if ( ! defined( 'ABSPATH' ) ) {
 	<h1><?php esc_html_e( 'Migrator – Import', 'migrator' ); ?></h1>
 	<p><?php esc_html_e( 'Upload a Migrator archive to restore the database and files. This will overwrite existing data — back up first.', 'migrator' ); ?></p>
 
-	<form id="migrator-import-form" class="migrator-form">
+	<form id="migrator-import-form" class="migrator-form" novalidate>
 		<table class="form-table" role="presentation">
 			<tr>
 				<th scope="row"><label for="migrator_archive"><?php esc_html_e( 'Archive (.zip)', 'migrator' ); ?></label></th>
 				<td>
-					<input type="file" id="migrator_archive" name="migrator_archive" accept=".zip,application/zip" required />
+					<input type="file" id="migrator_archive" name="migrator_archive" accept=".zip,application/zip" />
 				</td>
 			</tr>
 			<tr>
 				<th scope="row"><label for="migrator_new_url"><?php esc_html_e( 'New Site URL', 'migrator' ); ?></label></th>
 				<td>
-					<input type="url" id="migrator_new_url" name="migrator_new_url" class="regular-text" value="<?php echo esc_attr( get_site_url() ); ?>" />
-					<p class="description"><?php esc_html_e( 'URLs in the archive will be rewritten to this value.', 'migrator' ); ?></p>
+					<input type="text" id="migrator_new_url" name="migrator_new_url" class="regular-text" value="<?php echo esc_attr( get_site_url() ); ?>" />
+					<p class="description"><?php esc_html_e( 'URLs in the archive will be rewritten to this value. Leave as-is unless you are restoring onto a different host.', 'migrator' ); ?></p>
 				</td>
 			</tr>
 		</table>

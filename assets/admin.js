@@ -39,7 +39,8 @@
 		body.append('action', action);
 		body.append('_ajax_nonce', cfg.nonce);
 		Object.entries(params || {}).forEach(([k, v]) => body.append(k, v));
-		body.append('chunk', fileBlob);
+		// Third argument supplies a filename so $_FILES['chunk']['name'] is set on every host.
+		body.append('chunk', fileBlob, 'chunk.bin');
 		return fetch(cfg.ajaxUrl, { method: 'POST', body, credentials: 'same-origin' })
 			.then((r) => r.json())
 			.then((json) => {
@@ -117,6 +118,7 @@
 					await delay(cfg.pollMs);
 				}
 			} catch (err) {
+				console.error('[Migrator export]', err);
 				if (!cancelled) {
 					progressEl.hidden = true;
 					form.hidden = false;
@@ -172,10 +174,13 @@
 
 			const fileInput = $('#migrator_archive', form);
 			const file = fileInput.files[0];
-			if (!file) return;
+			if (!file) {
+				showError(errorEl, cfg.i18n.noFile || 'Please choose an archive to import.');
+				return;
+			}
 			if (!confirm(cfg.i18n.confirmImport)) return;
 
-			const newUrl = $('#migrator_new_url', form).value;
+			const newUrl = ($('#migrator_new_url', form).value || '').trim() || window.location.origin;
 
 			form.hidden = true;
 			progressEl.hidden = false;
@@ -217,6 +222,7 @@
 					await delay(cfg.pollMs);
 				}
 			} catch (err) {
+				console.error('[Migrator import]', err);
 				if (!cancelled) {
 					progressEl.hidden = true;
 					form.hidden = false;

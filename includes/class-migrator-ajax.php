@@ -114,7 +114,8 @@ class Migrator_Ajax {
 		// Initialize an empty archive file we'll append chunks to.
 		file_put_contents( $job->archive_path(), '' );
 
-		$job->state['data']['new_url']      = untrailingslashit( esc_url_raw( wp_unslash( $_POST['new_url'] ?? get_site_url() ) ) );
+		$raw_url                            = trim( (string) wp_unslash( $_POST['new_url'] ?? '' ) );
+		$job->state['data']['new_url']      = '' !== $raw_url ? untrailingslashit( esc_url_raw( $raw_url ) ) : untrailingslashit( get_site_url() );
 		$job->state['data']['chunks_received'] = 0;
 		$job->save();
 

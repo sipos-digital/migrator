@@ -12,7 +12,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 <div class="wrap migrator-wrap" data-migrator-screen="export">
 	<h1><?php esc_html_e( 'Migrator – Export', 'migrator' ); ?></h1>
 
-	<form id="migrator-export-form" class="migrator-form">
+	<form id="migrator-export-form" class="migrator-form" novalidate>
 
 		<fieldset class="migrator-fieldset">
 			<legend><?php esc_html_e( 'What to include', 'migrator' ); ?></legend>
