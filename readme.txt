@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.6
+Stable tag: 0.3.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.3.0 =
+* Preserve the operator across import. Before the first DB restore step, snapshot the current user's wp_users row + all usermeta (including session_tokens) to operator.json inside the job dir. After every batch — and at finalize — re-insert the operator so they remain in wp_users with the same password hash, admin capabilities, and session tokens. Result: the user driving the import stays logged in and can continue clicking through the UI even though the source site's users replaced theirs.
+* Refuse imports across mismatched $table_prefix. Surfaces a clear instruction to align wp-config.php instead of producing a half-broken site where the imported tables sit alongside the active ones.
 
 = 0.2.6 =
 * Fix: "rewrite_serialized(): Return value must be of type string, null returned" during the URL-rewriting step. The PCRE engine was hitting `pcre.backtrack_limit` on long INSERT lines containing many escaped quotes, causing `preg_replace_callback` to return null. Added a possessive quantifier to the serialized-data regex, switched the rewriter to stream the SQL dump line-by-line through a tmp file (so memory and regex scope stay bounded), and added defensive null handling that logs the PCRE error code and leaves the segment untouched instead of crashing the import.
