@@ -33,3 +33,25 @@ register_activation_hook( __FILE__, array( 'Migrator_Admin', 'activate' ) );
 register_deactivation_hook( __FILE__, array( 'Migrator_Admin', 'deactivate' ) );
 
 add_action( 'plugins_loaded', array( 'Migrator_Admin', 'init' ) );
+
+/**
+ * GitHub-based update checker.
+ *
+ * Updates are served from GitHub releases on sipos-digital/migrator.
+ * Publishing an update:
+ *   1. Bump the Version header above (e.g. 0.1.0 → 0.2.0)
+ *   2. Commit and push to main
+ *   3. Create a GitHub release with tag `v0.2.0` matching the version
+ *
+ * The auto-generated source zip is used; if a packaged plugin zip is
+ * attached to the release it will be preferred (enableReleaseAssets).
+ */
+require_once MIGRATOR_PLUGIN_DIR . 'lib/plugin-update-checker/plugin-update-checker.php';
+
+$migrator_update_checker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+	'https://github.com/sipos-digital/migrator/',
+	__FILE__,
+	'migrator'
+);
+
+$migrator_update_checker->getVcsApi()->enableReleaseAssets();

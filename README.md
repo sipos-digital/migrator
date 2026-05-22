@@ -57,6 +57,22 @@ The importer will:
 - Background job processing (everything runs in the request)
 - CLI command (WP-CLI integration)
 
+## Updates from GitHub
+
+Migrator ships with [YahnisElsts/plugin-update-checker](https://github.com/YahnisElsts/plugin-update-checker) (vendored in `lib/plugin-update-checker/`). WordPress will check this repository for updates and surface them on the **Plugins** screen just like a wp.org plugin.
+
+### Publishing a new version
+
+1. Bump the `Version:` header in `migrator.php` (e.g. `0.1.0` → `0.2.0`) and `Stable tag:` in `readme.txt`.
+2. Commit and push to `main`.
+3. Create a GitHub release with a tag matching the version (prefixed with `v`, e.g. `v0.2.0`):
+   ```bash
+   gh release create v0.2.0 --title "v0.2.0" --notes "Release notes here"
+   ```
+4. Users will see the update on their WP admin within ~12 hours (or sooner if they hit *Check again* on the Updates screen).
+
+If you want to ship a custom-packaged plugin zip (e.g. without dev files), attach it as a release asset — `enableReleaseAssets()` is on, so the asset will be preferred over the auto-generated source zip.
+
 ## Development
 
 The plugin follows the standard WordPress structure:

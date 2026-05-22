@@ -3,5 +3,5 @@
 .vscode/
 *.log
 node_modules/
-vendor/
+/vendor/
 *.zip
