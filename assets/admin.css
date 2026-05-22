@@ -1,0 +1,33 @@
+.migrator-wrap .description {
+	max-width: 720px;
+	margin-bottom: 1.25em;
+}
+
+.migrator-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+	gap: 16px;
+	margin: 20px 0 30px;
+	max-width: 900px;
+}
+
+.migrator-card {
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	border-radius: 4px;
+	padding: 20px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+.migrator-card h2 {
+	margin-top: 0;
+}
+
+.migrator-env {
+	max-width: 720px;
+}
+
+.migrator-env th {
+	width: 220px;
+	text-align: left;
+}
