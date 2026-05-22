@@ -4,11 +4,15 @@ A WordPress plugin to migrate sites between environments. Package the database a
 
 ## Features
 
-- One-click export of the WordPress database (tables sharing the configured prefix)
-- Bundles the uploads directory into the same archive
-- Restores onto another installation with URL rewriting
-- Handles PHP-serialized values when replacing URLs
-- Admin-only: protected by the `manage_options` capability and WordPress nonces
+- **Chunked AJAX** export and import with live progress bar, per-phase status, and cancel button
+- **Streamed DB dump** (`fwrite` + paginated `SELECT … LIMIT … OFFSET …`) — memory footprint stays low even on large databases
+- **Selective inclusion** via a profile form: database, uploads, themes, plugins, must-use plugins
+- **Database exclusions**: skip spam comments, post revisions, trashed posts, transients (`_transient_%`)
+- **Custom file exclusions**: `fnmatch` glob patterns and plain directory prefixes (e.g. `uploads/cache/`)
+- **Chunked archive upload** during import (works around `upload_max_filesize` / `post_max_size`)
+- **Safe URL rewriting** — handles PHP-serialized strings by recomputing the `s:N:` byte prefix
+- **GitHub-based update checker** (PUC v5)
+- Admin-only: `manage_options` capability + WordPress nonces; jobs are scoped to the creating user
 
 ## Requirements
 
@@ -30,32 +34,56 @@ A WordPress plugin to migrate sites between environments. Package the database a
 ### Export
 
 1. Go to **Migrator → Export**.
-2. Click **Download Archive**.
-3. A `.zip` file containing `database.sql`, the `uploads/` directory, and a manifest is downloaded.
+2. Tick the things you want to include — database, uploads, themes, plugins, mu-plugins.
+3. Optionally tick database exclusions (spam, revisions, trash, transients) and/or add custom file glob patterns to exclude.
+4. Click **Start Export**. The page switches to a live progress UI:
+   - **Phase:** `init` → `db_schema` → `db_data` → `db_attach` → `files` → `finalize` → `done`
+   - Cancel at any time — the working directory is cleaned up.
+5. When the archive is ready, click **Download Archive**. The job is destroyed automatically after download.
 
 ### Import
 
 1. On the target site, install and activate Migrator.
-2. Go to **Migrator → Import**.
-3. Upload the archive.
-4. Confirm the **New Site URL** (defaults to the current site URL).
-5. Click **Run Import**.
+2. Go to **Migrator → Import**, pick your `.zip`, confirm the **New Site URL**.
+3. Click **Start Import**. Flow:
+   - Archive is **chunked-uploaded** to `wp-content/uploads/migrator/job-<id>/upload.zip` in 5 MB slices
+   - **Validate** manifest
+   - **Extract** entries in batches
+   - **db_restore** — applies SQL statements with URL rewriting (incl. serialized values)
+   - **files_copy** — copies extracted files back to `uploads/`, `themes/`, `plugins/`, `mu-plugins/`
+   - **finalize** — cleans up the working directory
 
-The importer will:
+> **Warning:** Import overwrites the current database and matching directories. Take a backup first.
 
-- Extract the archive
-- Drop and recreate WordPress tables from the dump
-- Rewrite URLs (including in serialized values)
-- Copy uploads into `wp-content/uploads/`
+## How it works (architecture)
 
-> **Warning:** Import overwrites the current database. Always take a backup first.
+Migrator drives long-running operations through a **job state machine** persisted to `wp-content/uploads/migrator/job-<id>/state.json`. The browser polls a single AJAX endpoint that advances one chunk per request:
+
+```
+JS:  while (phase !== 'done')
+       snapshot = await fetch('admin-ajax.php?action=migrator_export_step', { job_id })
+       updateProgressBar(snapshot.overall_progress)
+       updateLabel(snapshot.label)
+```
+
+Each step reads `state.json`, processes one batch (e.g. 500 DB rows or 50 files), writes the new state, and returns a snapshot. Defaults are:
+
+| Batch | Default | Configurable via |
+|---|---|---|
+| DB rows per step | 500 | `Migrator_Exporter::DB_BATCH_ROWS` |
+| Files per step | 50 | `Migrator_Exporter::FILE_BATCH` |
+| Import statements per step | 200 | `Migrator_Importer::DB_BATCH_ROWS` |
+| Upload chunk size | 5 MB | `MigratorConfig.chunkKb` in PHP |
+| Poll delay | 250 ms | `MigratorConfig.pollMs` in PHP |
+
+The archive itself is built incrementally by reopening the same `output.zip` across requests — `ZipArchive::open($path)` without the `CREATE` flag preserves existing entries.
 
 ## What is *not* included (yet)
 
-- Theme and plugin files (use git/composer to deploy code)
-- Chunked/streamed export for very large sites
-- Background job processing (everything runs in the request)
-- CLI command (WP-CLI integration)
+- WP-CLI command (`wp migrator export …`)
+- Periodic/scheduled exports via WP-Cron
+- Cloud storage destinations (S3, Dropbox, etc.)
+- Resumable uploads across page reloads (state survives, but the JS loop has to be restarted manually)
 
 ## Updates from GitHub
 
@@ -75,23 +103,25 @@ If you want to ship a custom-packaged plugin zip (e.g. without dev files), attac
 
 ## Development
 
-The plugin follows the standard WordPress structure:
-
 ```
 migrator/
-├── migrator.php                 # Plugin bootstrap
-├── uninstall.php                # Cleanup on delete
+├── migrator.php                          # Plugin bootstrap + PUC update checker
+├── uninstall.php                         # Cleanup on delete
 ├── includes/
-│   ├── class-migrator-admin.php
-│   ├── class-migrator-exporter.php
-│   └── class-migrator-importer.php
+│   ├── class-migrator-profile.php        # Inclusion/exclusion config
+│   ├── class-migrator-job.php            # Job lifecycle + state.json persistence
+│   ├── class-migrator-exporter.php       # Phase-based export state machine
+│   ├── class-migrator-importer.php       # Phase-based import state machine
+│   ├── class-migrator-ajax.php           # admin-ajax router (start / step / cancel / download)
+│   └── class-migrator-admin.php          # Menu, asset enqueuing
 ├── admin/
-│   ├── dashboard.php
-│   ├── export.php
-│   └── import.php
-└── assets/
-    ├── admin.css
-    └── admin.js
+│   ├── dashboard.php                     # Environment summary
+│   ├── export.php                        # Profile form + progress UI
+│   └── import.php                        # Chunked upload + progress UI
+├── assets/
+│   ├── admin.css                         # Progress bar, fieldsets, cards
+│   └── admin.js                          # State-machine loop, chunked upload
+└── lib/plugin-update-checker/            # Vendored YahnisElsts/plugin-update-checker
 ```
 
 ## License

@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -16,10 +16,14 @@ Migrator packages your WordPress site into a single .zip archive that can be dow
 
 Features:
 
-* One-click export of the database (all tables sharing the WP table prefix)
-* Bundles the uploads directory into the same archive
-* Imports with safe URL rewriting (handles serialized data)
+* Chunked AJAX export and import with live progress bar and cancel
+* Streamed database dump (fwrite + paginated SELECT) — works on large sites
+* Selective inclusion: database, uploads, themes, plugins, must-use plugins
+* Database exclusions: skip spam, post revisions, trashed posts, transients
+* Custom file glob exclusions (e.g. `uploads/cache/`)
+* Safe URL rewriting on import — handles PHP-serialized strings
 * Admin-only — protected by `manage_options` capability and nonces
+* GitHub-based update checker
 
 == Installation ==
 
@@ -38,6 +42,15 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.0 =
+* Chunked AJAX export/import with live progress bar and cancel button
+* Streamed DB dump via fwrite + paginated SELECT (no more memory blow-ups)
+* Profile-based inclusion/exclusion: pick database/uploads/themes/plugins/mu-plugins
+* Database exclusions: skip spam comments, post revisions, trashed posts, transients
+* Custom file exclusion patterns (fnmatch + directory prefixes)
+* Chunked archive upload during import (works around upload_max_filesize)
+* New `Migrator_Job` state machine persisted to `wp-content/uploads/migrator/job-<id>/`
 
 = 0.1.0 =
 * Initial release: export and import with URL rewriting.

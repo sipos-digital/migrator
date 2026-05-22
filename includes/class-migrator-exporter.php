@@ -1,6 +1,17 @@
 <?php
 /**
- * Exports the WordPress database and uploads directory into a portable archive.
+ * Exporter — phase-based archive builder.
+ *
+ * The exporter is driven by Migrator_Ajax. Each call to step() advances the
+ * job by one chunk:
+ *
+ *   init        →  prepare workspace, materialize file list and table list
+ *   db_schema   →  write CREATE TABLE statements for all tables (one step)
+ *   db_data     →  write INSERTs for one table batch (paginated)
+ *   db_attach   →  add database.sql to the archive
+ *   files       →  add a batch of files to the archive
+ *   finalize    →  add manifest, close archive, expose download
+ *   done        →  archive ready for download
  *
  * @package Migrator
  */
@@ -11,36 +22,291 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Migrator_Exporter {
 
-	const MANIFEST_FILE = 'migrator-manifest.json';
-	const DB_FILE       = 'database.sql';
-	const UPLOADS_DIR   = 'uploads';
+	const MANIFEST_FILE  = 'migrator-manifest.json';
+	const DB_FILE        = 'database.sql';
+	const DB_BATCH_ROWS  = 500;
+	const FILE_BATCH     = 50;
 
-	public function export() {
+	private Migrator_Job $job;
+
+	public function __construct( Migrator_Job $job ) {
+		$this->job = $job;
+	}
+
+	/**
+	 * Advance the job by one chunk. Returns the job snapshot.
+	 */
+	public function step(): array {
+		$phase = $this->job->state['phase'] ?? 'init';
+
+		try {
+			switch ( $phase ) {
+				case 'init':
+					$this->phase_init();
+					break;
+				case 'db_schema':
+					$this->phase_db_schema();
+					break;
+				case 'db_data':
+					$this->phase_db_data();
+					break;
+				case 'db_attach':
+					$this->phase_db_attach();
+					break;
+				case 'files':
+					$this->phase_files();
+					break;
+				case 'finalize':
+					$this->phase_finalize();
+					break;
+				case 'done':
+					// No-op; client should stop polling.
+					break;
+				default:
+					throw new RuntimeException( sprintf( 'Unknown phase: %s', $phase ) );
+			}
+		} catch ( Throwable $e ) {
+			$this->job->state['phase'] = 'error';
+			$this->job->state['label'] = $e->getMessage();
+			$this->job->save();
+			throw $e;
+		}
+
+		$this->job->save();
+		$snapshot = $this->job->snapshot();
+		if ( 'done' === $this->job->state['phase'] ) {
+			$snapshot['download_url'] = $this->download_url();
+		}
+		return $snapshot;
+	}
+
+	private function phase_init(): void {
 		if ( ! class_exists( 'ZipArchive' ) ) {
-			return new WP_Error( 'migrator_no_zip', __( 'The ZipArchive PHP extension is required to export.', 'migrator' ) );
+			throw new RuntimeException( __( 'The ZipArchive PHP extension is required.', 'migrator' ) );
 		}
 
-		$work_dir = $this->work_dir();
-		if ( is_wp_error( $work_dir ) ) {
-			return $work_dir;
+		// Create an empty zip so subsequent file phases can append.
+		$zip = new ZipArchive();
+		if ( true !== $zip->open( $this->job->archive_path(), ZipArchive::CREATE | ZipArchive::OVERWRITE ) ) {
+			throw new RuntimeException( __( 'Could not create archive file.', 'migrator' ) );
+		}
+		$zip->close();
+
+		// Materialize the table list (only the ones we will dump).
+		$tables = $this->job->profile->include_database ? $this->list_tables() : array();
+
+		// Materialize the file list to disk so state.json stays small.
+		$files = $this->build_file_list();
+		file_put_contents( $this->job->files_list_path(), implode( "\n", $files ) );
+
+		// Empty database.sql ready for appending.
+		if ( $this->job->profile->include_database ) {
+			file_put_contents( $this->job->sql_path(), $this->sql_header() );
 		}
 
-		$sql_path = trailingslashit( $work_dir ) . self::DB_FILE;
-		$sql_dump = $this->dump_database();
-		if ( is_wp_error( $sql_dump ) ) {
-			return $sql_dump;
+		$next = $this->job->profile->include_database ? 'db_schema' : ( empty( $files ) ? 'finalize' : 'files' );
+
+		$this->job->set_phase(
+			$next,
+			array(
+				'tables'             => $tables,
+				'total_files'        => count( $files ),
+				'file_index'         => 0,
+				'table_index'        => 0,
+				'row_offset'         => 0,
+				'current_table_rows' => 0,
+				'rows_written'       => 0,
+				'total_rows'         => 0,
+			)
+		);
+		$this->job->update_progress( 0.01, __( 'Initialized', 'migrator' ), 1.0 );
+	}
+
+	private function phase_db_schema(): void {
+		global $wpdb;
+		$data   = $this->job->state['data'];
+		$tables = (array) $data['tables'];
+
+		$handle = fopen( $this->job->sql_path(), 'a' );
+		if ( false === $handle ) {
+			throw new RuntimeException( __( 'Could not open database.sql for writing.', 'migrator' ) );
 		}
 
-		if ( false === file_put_contents( $sql_path, $sql_dump ) ) {
-			return new WP_Error( 'migrator_write_failed', __( 'Could not write database dump to disk.', 'migrator' ) );
+		fwrite( $handle, "SET FOREIGN_KEY_CHECKS=0;\n\n" );
+		foreach ( $tables as $table ) {
+			$create = $wpdb->get_row( 'SHOW CREATE TABLE `' . esc_sql( $table ) . '`', ARRAY_N );
+			if ( empty( $create[1] ) ) {
+				continue;
+			}
+			fwrite( $handle, "DROP TABLE IF EXISTS `{$table}`;\n" );
+			fwrite( $handle, $create[1] . ";\n\n" );
+		}
+		fclose( $handle );
+
+		// Count total rows up-front so progress is meaningful.
+		$total_rows = 0;
+		foreach ( $tables as $table ) {
+			$where        = $this->where_for_table( $table );
+			$sql          = "SELECT COUNT(*) FROM `{$table}`" . ( $where ? " WHERE {$where}" : '' );
+			$total_rows  += (int) $wpdb->get_var( $sql );
+		}
+		$data['total_rows'] = $total_rows;
+
+		$this->job->set_phase( 'db_data', $data );
+		$this->job->update_progress( 0.05, __( 'Schema written', 'migrator' ), 1.0 );
+	}
+
+	private function phase_db_data(): void {
+		global $wpdb;
+		$data         = $this->job->state['data'];
+		$tables       = (array) $data['tables'];
+		$table_index  = (int) $data['table_index'];
+		$row_offset   = (int) $data['row_offset'];
+		$rows_written = (int) $data['rows_written'];
+		$total_rows   = max( 1, (int) $data['total_rows'] );
+
+		if ( $table_index >= count( $tables ) ) {
+			$this->job->set_phase( 'db_attach', $data );
+			$this->job->update_progress( 0.55, __( 'Database dump complete', 'migrator' ), 1.0 );
+			return;
 		}
 
-		$archive_name = sprintf( 'migrator-%s-%s.zip', sanitize_title( get_bloginfo( 'name' ) ), gmdate( 'Ymd-His' ) );
-		$archive_path = trailingslashit( $work_dir ) . $archive_name;
+		$table       = $tables[ $table_index ];
+		$where       = $this->where_for_table( $table );
+		$where_sql   = $where ? " WHERE {$where}" : '';
+		$batch       = self::DB_BATCH_ROWS;
+
+		$rows = $wpdb->get_results(
+			"SELECT * FROM `{$table}`{$where_sql} LIMIT {$batch} OFFSET {$row_offset}",
+			ARRAY_A
+		);
+
+		if ( empty( $rows ) ) {
+			$data['table_index'] = $table_index + 1;
+			$data['row_offset']  = 0;
+			$this->job->set_phase( 'db_data', $data );
+			$this->job->update_progress(
+				0.05 + 0.5 * ( $rows_written / $total_rows ),
+				sprintf( __( 'Finishing table %s', 'migrator' ), $table ),
+				$rows_written / $total_rows
+			);
+			return;
+		}
+
+		$handle = fopen( $this->job->sql_path(), 'a' );
+		if ( false === $handle ) {
+			throw new RuntimeException( __( 'Could not open database.sql for writing.', 'migrator' ) );
+		}
+
+		$columns      = array_keys( $rows[0] );
+		$columns_list = '`' . implode( '`, `', $columns ) . '`';
+
+		foreach ( $rows as $row ) {
+			$values = array();
+			foreach ( $row as $value ) {
+				if ( null === $value ) {
+					$values[] = 'NULL';
+				} else {
+					$values[] = "'" . esc_sql( $value ) . "'";
+				}
+			}
+			fwrite( $handle, "INSERT INTO `{$table}` ({$columns_list}) VALUES (" . implode( ', ', $values ) . ");\n" );
+		}
+		fclose( $handle );
+
+		$batch_count             = count( $rows );
+		$data['row_offset']      = $row_offset + $batch_count;
+		$data['rows_written']    = $rows_written + $batch_count;
+		$this->job->state['data'] = $data;
+
+		$overall = 0.05 + 0.5 * ( $data['rows_written'] / $total_rows );
+		$this->job->update_progress(
+			$overall,
+			sprintf( __( 'Dumping %1$s (%2$d / %3$d rows)', 'migrator' ), $table, $data['rows_written'], $total_rows ),
+			$data['rows_written'] / $total_rows
+		);
+	}
+
+	private function phase_db_attach(): void {
+		$zip = new ZipArchive();
+		if ( true !== $zip->open( $this->job->archive_path() ) ) {
+			throw new RuntimeException( __( 'Could not open archive to append database.', 'migrator' ) );
+		}
+		$handle = fopen( $this->job->sql_path(), 'a' );
+		fwrite( $handle, "\nSET FOREIGN_KEY_CHECKS=1;\n" );
+		fclose( $handle );
+
+		$zip->addFile( $this->job->sql_path(), self::DB_FILE );
+		$zip->close();
+
+		$data = $this->job->state['data'];
+		if ( ! empty( $data['total_files'] ) ) {
+			$this->job->set_phase( 'files', $data );
+		} else {
+			$this->job->set_phase( 'finalize', $data );
+		}
+		$this->job->update_progress( 0.6, __( 'Database attached to archive', 'migrator' ), 1.0 );
+	}
+
+	private function phase_files(): void {
+		$data        = $this->job->state['data'];
+		$file_index  = (int) $data['file_index'];
+		$total_files = (int) $data['total_files'];
+
+		if ( $file_index >= $total_files ) {
+			$this->job->set_phase( 'finalize', $data );
+			$this->job->update_progress( 0.95, __( 'All files added', 'migrator' ), 1.0 );
+			return;
+		}
+
+		$list_handle = fopen( $this->job->files_list_path(), 'r' );
+		if ( false === $list_handle ) {
+			throw new RuntimeException( __( 'Could not read file list.', 'migrator' ) );
+		}
+
+		// Seek to file_index by skipping lines.
+		for ( $i = 0; $i < $file_index; $i++ ) {
+			if ( false === fgets( $list_handle ) ) {
+				break;
+			}
+		}
 
 		$zip = new ZipArchive();
-		if ( true !== $zip->open( $archive_path, ZipArchive::CREATE | ZipArchive::OVERWRITE ) ) {
-			return new WP_Error( 'migrator_zip_open', __( 'Could not create archive file.', 'migrator' ) );
+		if ( true !== $zip->open( $this->job->archive_path() ) ) {
+			fclose( $list_handle );
+			throw new RuntimeException( __( 'Could not open archive to append files.', 'migrator' ) );
+		}
+
+		$processed = 0;
+		while ( $processed < self::FILE_BATCH && false !== ( $line = fgets( $list_handle ) ) ) {
+			$line = trim( $line );
+			if ( '' === $line ) {
+				continue;
+			}
+			list( $absolute, $zip_path ) = explode( '|', $line, 2 );
+			if ( file_exists( $absolute ) && is_file( $absolute ) ) {
+				$zip->addFile( $absolute, $zip_path );
+			}
+			$processed++;
+		}
+		fclose( $list_handle );
+		$zip->close();
+
+		$data['file_index']      = $file_index + $processed;
+		$this->job->state['data'] = $data;
+
+		$overall = 0.6 + 0.35 * ( $data['file_index'] / max( 1, $total_files ) );
+		$this->job->update_progress(
+			$overall,
+			sprintf( __( 'Adding files (%1$d / %2$d)', 'migrator' ), $data['file_index'], $total_files ),
+			$data['file_index'] / max( 1, $total_files )
+		);
+	}
+
+	private function phase_finalize(): void {
+		$zip = new ZipArchive();
+		if ( true !== $zip->open( $this->job->archive_path() ) ) {
+			throw new RuntimeException( __( 'Could not open archive to finalize.', 'migrator' ) );
 		}
 
 		$manifest = array(
@@ -50,127 +316,116 @@ class Migrator_Exporter {
 			'wp_version'     => get_bloginfo( 'version' ),
 			'created_at'     => gmdate( 'c' ),
 			'table_prefix'   => $GLOBALS['wpdb']->prefix,
+			'profile'        => $this->job->profile->to_array(),
 		);
-
 		$zip->addFromString( self::MANIFEST_FILE, wp_json_encode( $manifest, JSON_PRETTY_PRINT ) );
-		$zip->addFile( $sql_path, self::DB_FILE );
-
-		$uploads_basedir = wp_upload_dir()['basedir'];
-		if ( is_dir( $uploads_basedir ) ) {
-			$this->add_directory_to_zip( $zip, $uploads_basedir, self::UPLOADS_DIR );
-		}
-
 		$zip->close();
 
-		@unlink( $sql_path );
+		// Remove intermediate database.sql; it's already in the zip.
+		if ( file_exists( $this->job->sql_path() ) ) {
+			@unlink( $this->job->sql_path() );
+		}
+		if ( file_exists( $this->job->files_list_path() ) ) {
+			@unlink( $this->job->files_list_path() );
+		}
 
-		return $archive_path;
+		$this->job->set_phase( 'done', array() );
+		$this->job->update_progress( 1.0, __( 'Archive ready for download', 'migrator' ), 1.0 );
 	}
 
-	public function stream_archive( $archive_path ) {
-		if ( ! file_exists( $archive_path ) ) {
+	public function stream_download(): void {
+		$path = $this->job->archive_path();
+		if ( ! file_exists( $path ) ) {
 			wp_die( esc_html__( 'Archive not found.', 'migrator' ) );
 		}
 
+		$filename = sprintf( 'migrator-%s-%s.zip', sanitize_title( get_bloginfo( 'name' ) ), gmdate( 'Ymd-His' ) );
+
 		nocache_headers();
 		header( 'Content-Type: application/zip' );
-		header( 'Content-Disposition: attachment; filename="' . basename( $archive_path ) . '"' );
-		header( 'Content-Length: ' . filesize( $archive_path ) );
+		header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
+		header( 'Content-Length: ' . filesize( $path ) );
 
-		readfile( $archive_path );
-		@unlink( $archive_path );
+		readfile( $path );
+		$this->job->destroy();
 		exit;
 	}
 
-	private function work_dir() {
-		$upload_dir = wp_upload_dir();
-		$dir        = trailingslashit( $upload_dir['basedir'] ) . 'migrator';
-
-		if ( ! file_exists( $dir ) && ! wp_mkdir_p( $dir ) ) {
-			return new WP_Error( 'migrator_mkdir', __( 'Could not create working directory.', 'migrator' ) );
-		}
-
-		return $dir;
-	}
-
-	private function dump_database() {
-		global $wpdb;
-
-		$tables = $wpdb->get_col( 'SHOW TABLES' );
-		if ( empty( $tables ) ) {
-			return new WP_Error( 'migrator_no_tables', __( 'No tables found in the database.', 'migrator' ) );
-		}
-
-		$prefix = $wpdb->prefix;
-		$output = "-- Migrator database export\n";
-		$output .= '-- Generated: ' . gmdate( 'c' ) . "\n\n";
-		$output .= "SET FOREIGN_KEY_CHECKS=0;\n\n";
-
-		foreach ( $tables as $table ) {
-			// Only dump tables that share the WP prefix.
-			if ( 0 !== strpos( $table, $prefix ) ) {
-				continue;
-			}
-
-			$create_row = $wpdb->get_row( 'SHOW CREATE TABLE `' . esc_sql( $table ) . '`', ARRAY_N );
-			if ( empty( $create_row[1] ) ) {
-				continue;
-			}
-
-			$output .= "DROP TABLE IF EXISTS `{$table}`;\n";
-			$output .= $create_row[1] . ";\n\n";
-
-			$rows = $wpdb->get_results( 'SELECT * FROM `' . esc_sql( $table ) . '`', ARRAY_A );
-			if ( empty( $rows ) ) {
-				continue;
-			}
-
-			$columns      = array_keys( $rows[0] );
-			$columns_list = '`' . implode( '`, `', $columns ) . '`';
-
-			foreach ( $rows as $row ) {
-				$values = array();
-				foreach ( $row as $value ) {
-					if ( null === $value ) {
-						$values[] = 'NULL';
-					} else {
-						$values[] = "'" . esc_sql( $value ) . "'";
-					}
-				}
-				$output .= "INSERT INTO `{$table}` ({$columns_list}) VALUES (" . implode( ', ', $values ) . ");\n";
-			}
-
-			$output .= "\n";
-		}
-
-		$output .= "SET FOREIGN_KEY_CHECKS=1;\n";
-
-		return $output;
-	}
-
-	private function add_directory_to_zip( ZipArchive $zip, $source_dir, $local_root ) {
-		$source_dir = rtrim( $source_dir, '/\\' );
-		$iterator   = new RecursiveIteratorIterator(
-			new RecursiveDirectoryIterator( $source_dir, RecursiveDirectoryIterator::SKIP_DOTS ),
-			RecursiveIteratorIterator::SELF_FIRST
+	private function download_url(): string {
+		return add_query_arg(
+			array(
+				'action'  => 'migrator_export_download',
+				'job_id'  => $this->job->id,
+				'_wpnonce' => wp_create_nonce( Migrator_Ajax::NONCE ),
+			),
+			admin_url( 'admin-ajax.php' )
 		);
+	}
 
-		foreach ( $iterator as $file ) {
-			$path     = $file->getPathname();
-			$relative = ltrim( substr( $path, strlen( $source_dir ) ), '/\\' );
-			$relative = str_replace( '\\', '/', $relative );
+	private function list_tables(): array {
+		global $wpdb;
+		$all = (array) $wpdb->get_col( 'SHOW TABLES' );
+		return array_values( array_filter( $all, fn( $t ) => 0 === strpos( (string) $t, $wpdb->prefix ) ) );
+	}
 
-			// Skip Migrator's own working directory inside uploads.
-			if ( 0 === strpos( $relative, 'migrator/' ) || 'migrator' === $relative ) {
+	private function where_for_table( string $table ): string {
+		global $wpdb;
+		$suffix  = substr( $table, strlen( $wpdb->prefix ) );
+		$clauses = $this->job->profile->db_where_clauses();
+		return $clauses[ $suffix ] ?? '';
+	}
+
+	private function sql_header(): string {
+		return "-- Migrator database export\n-- Generated: " . gmdate( 'c' ) . "\n\n";
+	}
+
+	/**
+	 * Build a flat list of files (absolute|zip-relative per line) honoring exclusions.
+	 *
+	 * @return string[]
+	 */
+	private function build_file_list(): array {
+		$lines    = array();
+		$dirs     = $this->job->profile->content_dirs();
+		$exclude  = $this->job->profile;
+		$base_dir = Migrator_Job::base_dir();
+
+		foreach ( $dirs as $label => $absolute_root ) {
+			if ( ! is_dir( $absolute_root ) ) {
 				continue;
 			}
 
-			$zip_path = $local_root . '/' . $relative;
-			if ( $file->isDir() ) {
-				$zip->addEmptyDir( $zip_path );
-			} else {
-				$zip->addFile( $path, $zip_path );
+			$iter = new RecursiveIteratorIterator(
+				new RecursiveDirectoryIterator( $absolute_root, RecursiveDirectoryIterator::SKIP_DOTS ),
+				RecursiveIteratorIterator::LEAVES_ONLY
+			);
+
+			foreach ( $iter as $file ) {
+				if ( ! $file->isFile() ) {
+					continue;
+				}
+				$absolute = $file->getPathname();
+
+				// Skip the Migrator working directory itself.
+				if ( 0 === strpos( $absolute, $base_dir ) ) {
+					continue;
+				}
+				// Skip the Migrator plugin's own directory when exporting plugins.
+				if ( 'plugins' === $label && 0 === strpos( $absolute, MIGRATOR_PLUGIN_DIR ) ) {
+					continue;
+				}
+
+				$relative_to_root = ltrim( str_replace( '\\', '/', substr( $absolute, strlen( $absolute_root ) ) ), '/' );
+				$zip_path         = $label . '/' . $relative_to_root;
+
+				if ( $exclude->file_matches_exclude( $zip_path ) ) {
+					continue;
+				}
+
+				$lines[] = $absolute . '|' . $zip_path;
 			}
 		}
+
+		return $lines;
 	}
 }
