@@ -85,12 +85,11 @@ class Migrator_Exporter {
 			throw new RuntimeException( __( 'The ZipArchive PHP extension is required.', 'migrator' ) );
 		}
 
-		// Create an empty zip so subsequent file phases can append.
-		$zip = new ZipArchive();
-		if ( true !== $zip->open( $this->job->archive_path(), ZipArchive::CREATE | ZipArchive::OVERWRITE ) ) {
-			throw new RuntimeException( __( 'Could not create archive file.', 'migrator' ) );
+		// Make sure any stale archive from a previous run is gone — first append
+		// in a later phase will create a fresh zip.
+		if ( file_exists( $this->job->archive_path() ) ) {
+			@unlink( $this->job->archive_path() );
 		}
-		$zip->close();
 
 		// Materialize the table list (only the ones we will dump).
 		$tables = $this->job->profile->include_database ? $this->list_tables() : array();
@@ -228,14 +227,11 @@ class Migrator_Exporter {
 	}
 
 	private function phase_db_attach(): void {
-		$zip = new ZipArchive();
-		if ( true !== $zip->open( $this->job->archive_path() ) ) {
-			throw new RuntimeException( __( 'Could not open archive to append database.', 'migrator' ) );
-		}
 		$handle = fopen( $this->job->sql_path(), 'a' );
 		fwrite( $handle, "\nSET FOREIGN_KEY_CHECKS=1;\n" );
 		fclose( $handle );
 
+		$zip = $this->open_archive_for_write();
 		$zip->addFile( $this->job->sql_path(), self::DB_FILE );
 		$zip->close();
 
@@ -271,10 +267,11 @@ class Migrator_Exporter {
 			}
 		}
 
-		$zip = new ZipArchive();
-		if ( true !== $zip->open( $this->job->archive_path() ) ) {
+		try {
+			$zip = $this->open_archive_for_write();
+		} catch ( Throwable $e ) {
 			fclose( $list_handle );
-			throw new RuntimeException( __( 'Could not open archive to append files.', 'migrator' ) );
+			throw $e;
 		}
 
 		$processed = 0;
@@ -304,10 +301,7 @@ class Migrator_Exporter {
 	}
 
 	private function phase_finalize(): void {
-		$zip = new ZipArchive();
-		if ( true !== $zip->open( $this->job->archive_path() ) ) {
-			throw new RuntimeException( __( 'Could not open archive to finalize.', 'migrator' ) );
-		}
+		$zip = $this->open_archive_for_write();
 
 		$manifest = array(
 			'plugin_version' => MIGRATOR_VERSION,
@@ -331,6 +325,21 @@ class Migrator_Exporter {
 
 		$this->job->set_phase( 'done', array() );
 		$this->job->update_progress( 1.0, __( 'Archive ready for download', 'migrator' ), 1.0 );
+	}
+
+	/**
+	 * Open the job's archive for writing. Creates the file if it does not exist
+	 * yet — works around the PHP quirk where `ZipArchive::close()` on an empty
+	 * new archive does not actually write a file to disk.
+	 */
+	private function open_archive_for_write(): ZipArchive {
+		$path  = $this->job->archive_path();
+		$flags = file_exists( $path ) ? 0 : ZipArchive::CREATE;
+		$zip   = new ZipArchive();
+		if ( true !== $zip->open( $path, $flags ) ) {
+			throw new RuntimeException( __( 'Could not open archive.', 'migrator' ) );
+		}
+		return $zip;
 	}
 
 	public function stream_download(): void {

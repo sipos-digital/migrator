@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.0
+Stable tag: 0.2.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,9 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.1 =
+* Fix: "Could not open archive to append database." — the empty zip created in the init phase was not written to disk by PHP's ZipArchive (a known PHP quirk on empty archives), so the next phase had nothing to open. Archive is now created lazily on the first append using the CREATE flag.
 
 = 0.2.0 =
 * Chunked AJAX export/import with live progress bar and cancel button
