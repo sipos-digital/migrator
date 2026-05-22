@@ -411,23 +411,56 @@ class Migrator_Importer {
 
 	/**
 	 * Rewrite URLs in the SQL dump, handling PHP-serialized strings safely.
-	 * The whole file is read into memory at once — acceptable because the DB
-	 * dump is on the same order of magnitude as the database itself, and the
-	 * alternative (line-by-line) can't see serialized headers split mid-stream.
+	 *
+	 * Streams the file line by line into a tmp file, then renames over the
+	 * original. Per-line processing bounds both memory use and regex scope —
+	 * each INSERT in our own dumps lives on a single line, so serialized
+	 * blobs never get split mid-stream.
 	 */
 	private function rewrite_urls_in_file( string $path, string $old, string $new ): void {
-		$contents = file_get_contents( $path );
-		if ( false === $contents ) {
+		if ( $old === $new ) {
 			return;
 		}
-		$contents = $this->rewrite_serialized( $contents, $old, $new );
-		$contents = str_replace( $old, $new, $contents );
-		file_put_contents( $path, $contents );
+
+		$tmp = $path . '.tmp';
+		$in  = fopen( $path, 'r' );
+		$out = fopen( $tmp, 'w' );
+		if ( false === $in || false === $out ) {
+			if ( $in ) {
+				fclose( $in );
+			}
+			if ( $out ) {
+				fclose( $out );
+			}
+			throw new RuntimeException( __( 'Could not open SQL dump for URL rewriting.', 'migrator' ) );
+		}
+
+		while ( false !== ( $line = fgets( $in ) ) ) {
+			$line = $this->rewrite_serialized( $line, $old, $new );
+			$line = str_replace( $old, $new, $line );
+			fwrite( $out, $line );
+		}
+
+		fclose( $in );
+		fclose( $out );
+
+		if ( ! rename( $tmp, $path ) ) {
+			@unlink( $tmp );
+			throw new RuntimeException( __( 'Could not finalize URL rewriting.', 'migrator' ) );
+		}
 	}
 
+	/**
+	 * Replace $old with $new inside PHP-serialized string headers (s:N:"...").
+	 * The possessive *+ quantifier prevents pathological backtracking when an
+	 * INSERT contains many escaped quotes; if the engine still aborts (huge
+	 * lines, JIT stack, malformed UTF-8), we return the line untouched and
+	 * let the subsequent plain str_replace pick up URLs outside serialized
+	 * values.
+	 */
 	private function rewrite_serialized( string $sql, string $old, string $new ): string {
-		$pattern = '/s:(\d+):\\\\"((?:[^"\\\\]|\\\\.)*)\\\\"/';
-		return preg_replace_callback(
+		$pattern = '/s:(\d+):\\\\"((?:[^"\\\\]|\\\\.)*+)\\\\"/';
+		$result  = preg_replace_callback(
 			$pattern,
 			function ( $matches ) use ( $old, $new ) {
 				$value = stripslashes( $matches[2] );
@@ -440,6 +473,11 @@ class Migrator_Importer {
 			},
 			$sql
 		);
+		if ( null === $result ) {
+			error_log( '[Migrator] rewrite_serialized: preg_replace_callback failed (PCRE error ' . preg_last_error() . '), falling back to plain str_replace for this segment.' );
+			return $sql;
+		}
+		return $result;
 	}
 
 	private function rrmdir( string $dir ): void {

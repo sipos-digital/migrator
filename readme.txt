@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.2.5
+Stable tag: 0.2.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,9 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.2.6 =
+* Fix: "rewrite_serialized(): Return value must be of type string, null returned" during the URL-rewriting step. The PCRE engine was hitting `pcre.backtrack_limit` on long INSERT lines containing many escaped quotes, causing `preg_replace_callback` to return null. Added a possessive quantifier to the serialized-data regex, switched the rewriter to stream the SQL dump line-by-line through a tmp file (so memory and regex scope stay bounded), and added defensive null handling that logs the PCRE error code and leaves the segment untouched instead of crashing the import.
 
 = 0.2.5 =
 * Fix: import accepts archives that were re-zipped by macOS Finder. Finder's "Compress" wraps everything in a single directory named after the archive and adds a __MACOSX/ resource fork tree, which previously caused "Archive is missing migrator-manifest.json". The importer now locates the manifest anywhere in the archive, detects the wrapper prefix, and strips it (plus __MACOSX/ and .DS_Store entries) on extract and copy.
