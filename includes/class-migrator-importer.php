@@ -226,22 +226,27 @@ class Migrator_Importer {
 		}
 		$data['archive_base'] = $base;
 
+		// Prepare URL-rewritten SQL file now so we don't have to re-read the
+		// manifest later. Files are copied BEFORE the DB is restored — otherwise
+		// the new wp_options.active_plugins points at plugin files that the
+		// importer hasn't copied yet, and the next AJAX request fatals trying
+		// to include them.
 		$sql_file = $base . '/' . Migrator_Exporter::DB_FILE;
 		if ( file_exists( $sql_file ) ) {
-			// Apply URL rewriting once, in-place.
-			$manifest  = (array) $data['manifest'];
-			$old_url   = untrailingslashit( (string) $manifest['site_url'] );
-			$new_url   = untrailingslashit( (string) $data['new_url'] );
+			$manifest = (array) $data['manifest'];
+			$old_url  = untrailingslashit( (string) $manifest['site_url'] );
+			$new_url  = untrailingslashit( (string) $data['new_url'] );
 			if ( $old_url !== $new_url ) {
 				$this->rewrite_urls_in_file( $sql_file, $old_url, $new_url );
 			}
 			$data['sql_total']  = filesize( $sql_file );
 			$data['sql_offset'] = 0;
-			$this->job->set_phase( 'db_restore', $data );
-			$this->job->update_progress( 0.3, __( 'Restoring database', 'migrator' ), 0.0 );
+			$data['has_sql']    = true;
 		} else {
-			$this->prepare_files_copy_phase( $data );
+			$data['has_sql'] = false;
 		}
+
+		$this->prepare_files_copy_phase( $data );
 	}
 
 	private function phase_db_restore(): void {
@@ -307,12 +312,13 @@ class Migrator_Importer {
 		$data['sql_offset'] = $new_offset;
 
 		if ( $eof ) {
-			$this->prepare_files_copy_phase( $data );
+			$this->job->set_phase( 'finalize', $data );
+			$this->job->update_progress( 0.95, __( 'Database restored', 'migrator' ), 1.0 );
 			return;
 		}
 
 		$this->job->state['data'] = $data;
-		$overall = 0.3 + 0.4 * ( $new_offset / max( 1, $sql_total ) );
+		$overall = 0.65 + 0.3 * ( $new_offset / max( 1, $sql_total ) );
 		$this->job->update_progress(
 			$overall,
 			sprintf( __( 'Restoring database (%d statements applied, %d skipped)', 'migrator' ), $statements - $skipped, $skipped ),
@@ -339,13 +345,19 @@ class Migrator_Importer {
 		$data['file_index'] = 0;
 
 		if ( 0 === $copy_map['count'] ) {
-			$this->job->set_phase( 'finalize', $data );
-			$this->job->update_progress( 0.95, __( 'No files to copy', 'migrator' ), 1.0 );
+			// Skip straight to db_restore when there are no files to copy.
+			if ( ! empty( $data['has_sql'] ) ) {
+				$this->job->set_phase( 'db_restore', $data );
+				$this->job->update_progress( 0.65, __( 'Restoring database', 'migrator' ), 0.0 );
+			} else {
+				$this->job->set_phase( 'finalize', $data );
+				$this->job->update_progress( 0.95, __( 'Nothing to do', 'migrator' ), 1.0 );
+			}
 			return;
 		}
 
 		$this->job->set_phase( 'files_copy', $data );
-		$this->job->update_progress( 0.7, __( 'Copying files', 'migrator' ), 0.0 );
+		$this->job->update_progress( 0.15, __( 'Copying files', 'migrator' ), 0.0 );
 	}
 
 	private function phase_files_copy(): void {
@@ -354,8 +366,15 @@ class Migrator_Importer {
 		$total_copy = (int) $data['total_copy'];
 
 		if ( $file_index >= $total_copy ) {
-			$this->job->set_phase( 'finalize', $data );
-			$this->job->update_progress( 0.95, __( 'All files copied', 'migrator' ), 1.0 );
+			// Files are in place — now safe to restore the DB (which will swap
+			// active_plugins to the source's set, pointing at files we just copied).
+			if ( ! empty( $data['has_sql'] ) ) {
+				$this->job->set_phase( 'db_restore', $data );
+				$this->job->update_progress( 0.65, __( 'Restoring database', 'migrator' ), 0.0 );
+			} else {
+				$this->job->set_phase( 'finalize', $data );
+				$this->job->update_progress( 0.95, __( 'All files copied', 'migrator' ), 1.0 );
+			}
 			return;
 		}
 
@@ -387,7 +406,7 @@ class Migrator_Importer {
 		$data['file_index']      = $file_index + $processed;
 		$this->job->state['data'] = $data;
 
-		$overall = 0.7 + 0.25 * ( $data['file_index'] / max( 1, $total_copy ) );
+		$overall = 0.15 + 0.5 * ( $data['file_index'] / max( 1, $total_copy ) );
 		$this->job->update_progress(
 			$overall,
 			sprintf( __( 'Copying files (%1$d / %2$d)', 'migrator' ), $data['file_index'], $total_copy ),
@@ -439,6 +458,11 @@ class Migrator_Importer {
 					continue;
 				}
 				$relative = ltrim( str_replace( '\\', '/', substr( $absolute, strlen( $source_root ) ) ), '/' );
+				// Never overwrite the running Migrator plugin with a copy from the archive —
+				// it would clobber the running PHP and crash mid-import.
+				if ( 'plugins' === $label && ( 'migrator' === $relative || 0 === strpos( $relative, 'migrator/' ) ) ) {
+					continue;
+				}
 				$lines[]  = $absolute . '|' . trailingslashit( $dest_root ) . $relative;
 			}
 		}

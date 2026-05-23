@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.3.1
+Stable tag: 0.3.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,11 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.3.2 =
+* Fix: import now copies files BEFORE restoring the database. Previously the DB restore replaced `wp_options.active_plugins` with the source's list, but the source's plugin files hadn't been copied to wp-content/plugins yet. The next AJAX request would load WordPress, see the new active_plugins, fail to include the plugin files (partially or entirely missing), and PHP would fatal mid-request — surfacing in the browser as "JSON Parse error: Unrecognized token '<'".
+* Defensive: never overwrite the running Migrator plugin with a copy from the archive, even if a malformed export ever included it. (Our exporter already skips itself, but importing a corrupt third-party archive could still try.)
+* Phase order is now: init → extract → files_copy → db_restore → finalize.
 
 = 0.3.1 =
 * Replace operator-preservation with a simpler, race-free approach: never touch the target site's `wp_users` and `wp_usermeta` tables during DB restore. The operator's account, password hash, capabilities, and session tokens are left exactly as they were on the target. No ID collisions (the previous "Duplicate entry '1' for key 'wp_users.PRIMARY'" error is gone), no logout mid-import. Source-site users are not migrated; posts authored by source users will fall back to WordPress's standard "unknown author" handling.
