@@ -248,14 +248,6 @@ class Migrator_Importer {
 		global $wpdb;
 		$data       = $this->job->state['data'];
 
-		// First entry into this phase: snapshot the operator *before* any DDL
-		// runs, so that we can re-insert them after each batch and keep their
-		// session valid across AJAX requests.
-		if ( empty( $data['operator_captured'] ) ) {
-			$this->snapshot_operator();
-			$data['operator_captured'] = true;
-		}
-
 		$sql_file   = ( $data['archive_base'] ?? $data['extract_dir'] ) . '/' . Migrator_Exporter::DB_FILE;
 		$sql_total  = (int) $data['sql_total'];
 		$sql_offset = (int) $data['sql_offset'];
@@ -268,10 +260,20 @@ class Migrator_Importer {
 			fseek( $handle, $sql_offset );
 		}
 
+		// Tables we never touch — keeps the operator's account, password, and
+		// session tokens intact across the import (so they stay logged in) and
+		// avoids ID collisions on wp_users.PRIMARY when the source dump
+		// re-inserts user ID 1.
+		$protected_tables = array(
+			$wpdb->users,
+			$wpdb->usermeta,
+		);
+
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
 
-		$statements    = 0;
-		$buffer        = '';
+		$statements = 0;
+		$skipped    = 0;
+		$buffer     = '';
 		while ( $statements < self::DB_BATCH_ROWS && false !== ( $line = fgets( $handle ) ) ) {
 			$buffer .= $line;
 			if ( preg_match( '/;\s*$/', $line ) ) {
@@ -280,14 +282,16 @@ class Migrator_Importer {
 				if ( '' === $statement || 0 === strpos( $statement, '--' ) ) {
 					continue;
 				}
+				if ( $this->statement_targets_table( $statement, $protected_tables ) ) {
+					$skipped++;
+					$statements++;
+					continue;
+				}
 				$result = $wpdb->query( $statement );
 				if ( false === $result ) {
 					$err = $wpdb->last_error;
 					fclose( $handle );
 					$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
-					// Best effort: restore operator even on SQL failure so the user
-					// can still log in to investigate / retry.
-					$this->restore_operator();
 					throw new RuntimeException( sprintf( /* translators: %s: MySQL error */ __( 'SQL error: %s', 'migrator' ), $err ) );
 				}
 				$statements++;
@@ -300,11 +304,6 @@ class Migrator_Importer {
 
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=1' );
 
-		// Re-insert the operator into wp_users / wp_usermeta so that the next
-		// AJAX request still authenticates and the operator still has admin
-		// capabilities even if the imported users table has wiped them.
-		$this->restore_operator();
-
 		$data['sql_offset'] = $new_offset;
 
 		if ( $eof ) {
@@ -316,125 +315,21 @@ class Migrator_Importer {
 		$overall = 0.3 + 0.4 * ( $new_offset / max( 1, $sql_total ) );
 		$this->job->update_progress(
 			$overall,
-			sprintf( __( 'Restoring database (%d statements applied)', 'migrator' ), $statements ),
+			sprintf( __( 'Restoring database (%d statements applied, %d skipped)', 'migrator' ), $statements - $skipped, $skipped ),
 			$new_offset / max( 1, $sql_total )
 		);
 	}
 
 	/**
-	 * Persist the current user's row + all usermeta to operator.json inside
-	 * the job dir, so we can re-insert them into the (about-to-be-replaced)
-	 * users tables and keep their session valid.
-	 *
-	 * Kept out of state.json on purpose: the snapshot includes the password
-	 * hash and session tokens, and state.json is read+written every step;
-	 * isolating it limits the blast radius if anything ever serializes the
-	 * state for logging or diagnostics.
+	 * Inspect a SQL statement and return true if its target table is in $tables.
+	 * Recognises the DDL/DML our exporter emits: DROP TABLE, CREATE TABLE,
+	 * INSERT INTO, plus UPDATE / DELETE / LOCK / UNLOCK for defence in depth.
 	 */
-	private function snapshot_operator(): void {
-		global $wpdb;
-		$user_id = get_current_user_id();
-		if ( ! $user_id ) {
-			return;
+	private function statement_targets_table( string $statement, array $tables ): bool {
+		if ( ! preg_match( '/^\s*(?:DROP\s+TABLE(?:\s+IF\s+EXISTS)?|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|INSERT\s+(?:IGNORE\s+)?INTO|UPDATE|DELETE\s+FROM|LOCK\s+TABLES|UNLOCK\s+TABLES|ALTER\s+TABLE|TRUNCATE\s+TABLE)\s+`?([^`\s(;]+)`?/i', $statement, $m ) ) {
+			return false;
 		}
-
-		$user_row = $wpdb->get_row(
-			$wpdb->prepare( "SELECT * FROM {$wpdb->users} WHERE ID = %d", $user_id ),
-			ARRAY_A
-		);
-		if ( ! $user_row ) {
-			return;
-		}
-
-		$user_meta = $wpdb->get_results(
-			$wpdb->prepare( "SELECT meta_key, meta_value FROM {$wpdb->usermeta} WHERE user_id = %d", $user_id ),
-			ARRAY_A
-		);
-
-		$snapshot = array(
-			'prefix'    => $wpdb->prefix,
-			'user_id'   => (int) $user_row['ID'],
-			'user_row'  => $user_row,
-			'user_meta' => (array) $user_meta,
-		);
-
-		file_put_contents( $this->operator_snapshot_path(), wp_json_encode( $snapshot ) );
-	}
-
-	/**
-	 * Re-insert the snapshotted operator into wp_users / wp_usermeta.
-	 *
-	 * Strategy: if a user with the same user_login already exists in the
-	 * (just-restored) wp_users, update that row in-place to the operator's
-	 * values and replace their usermeta wholesale. Otherwise insert, trying
-	 * to preserve the original ID.
-	 *
-	 * Suppress wpdb errors during this routine — a failure to restore the
-	 * operator should be logged, not propagated, so that an SQL error doesn't
-	 * itself leave the user locked out.
-	 */
-	private function restore_operator(): void {
-		$path = $this->operator_snapshot_path();
-		if ( ! file_exists( $path ) ) {
-			return;
-		}
-
-		$snapshot = json_decode( file_get_contents( $path ), true );
-		if ( ! is_array( $snapshot ) || empty( $snapshot['user_row'] ) ) {
-			return;
-		}
-
-		global $wpdb;
-		$row   = (array) $snapshot['user_row'];
-		$login = (string) ( $row['user_login'] ?? '' );
-		if ( '' === $login ) {
-			return;
-		}
-
-		$previous_suppress = $wpdb->suppress_errors( true );
-
-		$existing_id = $wpdb->get_var(
-			$wpdb->prepare( "SELECT ID FROM {$wpdb->users} WHERE user_login = %s", $login )
-		);
-
-		if ( $existing_id ) {
-			$update = $row;
-			unset( $update['ID'] );
-			$wpdb->update( $wpdb->users, $update, array( 'ID' => $existing_id ) );
-			$wpdb->delete( $wpdb->usermeta, array( 'user_id' => $existing_id ) );
-			$target_id = (int) $existing_id;
-		} else {
-			$original_id = (int) $row['ID'];
-			$id_taken    = $original_id
-				? $wpdb->get_var( $wpdb->prepare( "SELECT ID FROM {$wpdb->users} WHERE ID = %d", $original_id ) )
-				: 1;
-			if ( $id_taken ) {
-				$insert = $row;
-				unset( $insert['ID'] );
-				$wpdb->insert( $wpdb->users, $insert );
-				$target_id = (int) $wpdb->insert_id;
-			} else {
-				$wpdb->insert( $wpdb->users, $row );
-				$target_id = $original_id;
-			}
-		}
-
-		foreach ( (array) $snapshot['user_meta'] as $meta ) {
-			$wpdb->insert(
-				$wpdb->usermeta,
-				array(
-					'user_id'    => $target_id,
-					'meta_key'   => (string) ( $meta['meta_key'] ?? '' ),
-					'meta_value' => (string) ( $meta['meta_value'] ?? '' ),
-				)
-			);
-		}
-
-		$wpdb->suppress_errors( $previous_suppress );
-	}
-
-	private function operator_snapshot_path(): string {
-		return $this->job->dir() . '/operator.json';
+		return in_array( $m[1], $tables, true );
 	}
 
 	private function prepare_files_copy_phase( array $data ): void {
@@ -503,21 +398,12 @@ class Migrator_Importer {
 	private function phase_finalize(): void {
 		$data = $this->job->state['data'];
 
-		// Final operator restore, in case the previous step's batch overwrote
-		// the operator's usermeta and we never came back through phase_db_restore
-		// (e.g. when only files were imported, or when the SQL ended mid-batch).
-		$this->restore_operator();
-
 		// Cleanup extract dir + intermediate files.
 		if ( ! empty( $data['extract_dir'] ) && is_dir( $data['extract_dir'] ) ) {
 			$this->rrmdir( $data['extract_dir'] );
 		}
 		if ( file_exists( $this->job->files_list_path() ) ) {
 			@unlink( $this->job->files_list_path() );
-		}
-		// Operator snapshot contains password hash + session tokens — wipe it.
-		if ( file_exists( $this->operator_snapshot_path() ) ) {
-			@unlink( $this->operator_snapshot_path() );
 		}
 
 		$this->job->set_phase( 'done', array() );

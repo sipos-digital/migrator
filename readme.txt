@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.3.0
+Stable tag: 0.3.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.3.1 =
+* Replace operator-preservation with a simpler, race-free approach: never touch the target site's `wp_users` and `wp_usermeta` tables during DB restore. The operator's account, password hash, capabilities, and session tokens are left exactly as they were on the target. No ID collisions (the previous "Duplicate entry '1' for key 'wp_users.PRIMARY'" error is gone), no logout mid-import. Source-site users are not migrated; posts authored by source users will fall back to WordPress's standard "unknown author" handling.
+* Removed `snapshot_operator()` / `restore_operator()` and the on-disk `operator.json` snapshot file (no longer needed; nothing sensitive lingers in the job dir).
 
 = 0.3.0 =
 * Preserve the operator across import. Before the first DB restore step, snapshot the current user's wp_users row + all usermeta (including session_tokens) to operator.json inside the job dir. After every batch — and at finalize — re-insert the operator so they remain in wp_users with the same password hash, admin capabilities, and session tokens. Result: the user driving the import stays logged in and can continue clicking through the UI even though the source site's users replaced theirs.

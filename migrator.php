@@ -3,7 +3,7 @@
  * Plugin Name:       Migrator
  * Plugin URI:        https://github.com/sipos-digital/migrator
  * Description:       Migrate WordPress sites between environments. Export your site (database + files) into a single archive and import it on another installation, with chunked AJAX progress and configurable inclusion filters.
- * Version:           0.3.0
+ * Version:           0.3.1
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Sipos Digital
@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'MIGRATOR_VERSION', '0.3.0' );
+define( 'MIGRATOR_VERSION', '0.3.1' );
 define( 'MIGRATOR_PLUGIN_FILE', __FILE__ );
 define( 'MIGRATOR_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MIGRATOR_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
