@@ -354,13 +354,42 @@ class Migrator_Exporter {
 		}
 
 		$filename = sprintf( 'migrator-%s-%s.zip', sanitize_title( get_bloginfo( 'name' ) ), gmdate( 'Ymd-His' ) );
+		$size     = filesize( $path );
+
+		// Discard every output buffer accumulated by WP / themes / other plugins.
+		// Otherwise the full archive ends up in memory before being sent, which
+		// blows past PHP's memory_limit on multi-MB sites and the resulting
+		// fatal surfaces as the WordPress "critical error" HTML page being
+		// saved by the browser as a .zip file.
+		while ( ob_get_level() > 0 ) {
+			@ob_end_clean();
+		}
+		@ini_set( 'zlib.output_compression', 'Off' );
+		if ( function_exists( 'apache_setenv' ) ) {
+			@apache_setenv( 'no-gzip', '1' );
+		}
 
 		nocache_headers();
 		header( 'Content-Type: application/zip' );
 		header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
-		header( 'Content-Length: ' . filesize( $path ) );
+		header( 'Content-Length: ' . $size );
+		header( 'X-Content-Type-Options: nosniff' );
 
-		readfile( $path );
+		// Stream the file in 1 MB chunks. Flat memory profile regardless of
+		// archive size; no implicit buffering by readfile() in some PHP/SAPI
+		// configurations.
+		$fp = fopen( $path, 'rb' );
+		if ( false === $fp ) {
+			// Headers are already sent so we can't switch to a JSON error;
+			// best we can do is emit nothing and let the client time out.
+			exit;
+		}
+		while ( ! feof( $fp ) ) {
+			echo fread( $fp, 1048576 );
+			flush();
+		}
+		fclose( $fp );
+
 		$this->job->destroy();
 		exit;
 	}

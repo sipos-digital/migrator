@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.3.2
+Stable tag: 0.3.3
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,9 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.3.3 =
+* Fix: archive download no longer fatals on large exports. `readfile()` was running with WP's accumulated output buffers and zlib compression still active, so multi-MB archives were buffered into memory and tripped `memory_limit`. The resulting PHP fatal produced the WordPress "critical error" HTML page, which the browser then saved with a `.zip` extension (because `Content-Disposition` was already set). The download is now streamed in 1 MB chunks with all output buffering, gzip, and mod_deflate explicitly disabled — flat memory profile regardless of archive size.
 
 = 0.3.2 =
 * Fix: import now copies files BEFORE restoring the database. Previously the DB restore replaced `wp_options.active_plugins` with the source's list, but the source's plugin files hadn't been copied to wp-content/plugins yet. The next AJAX request would load WordPress, see the new active_plugins, fail to include the plugin files (partially or entirely missing), and PHP would fatal mid-request — surfacing in the browser as "JSON Parse error: Unrecognized token '<'".
