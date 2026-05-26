@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.4.1
+Stable tag: 0.5.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,9 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.5.0 =
+* New: "Skip database tables" textarea in the Export profile. Accepts one fnmatch glob per line (case-insensitive), matched against the full table name including the prefix. Skipped tables are removed before `list_tables()` returns, so they never reach `COUNT(*)`, `SHOW CREATE TABLE`, or the dump. Useful for wide, regeneratable plugin tables (Wordfence's `*wfFileMods` / `*wfHits` / `*wfBlocks*` / `*wfLogins` / `*wfSecurityEvents`, WooCommerce's `*woocommerce_sessions`, ActionScheduler's `*actionscheduler_logs`) which the target site will rebuild on its own.
 
 = 0.4.1 =
 * Fix: snapshot `MAX(pk)` per table at dump start and cap the cursor at that value. Without the cap, rows inserted during the export (e.g. by a concurrent Wordfence scan filling `wfFileMods` at 100k+ rows/minute) got pulled into the dump and the cursor chased a moving tail — the user saw 1.73M / 361k rows and growing. The COUNT(*) for the progress total now uses the same cap so the ratio is meaningful.

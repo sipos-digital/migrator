@@ -511,8 +511,23 @@ class Migrator_Exporter {
 
 	private function list_tables(): array {
 		global $wpdb;
-		$all = (array) $wpdb->get_col( 'SHOW TABLES' );
-		return array_values( array_filter( $all, fn( $t ) => 0 === strpos( (string) $t, $wpdb->prefix ) ) );
+		$all     = (array) $wpdb->get_col( 'SHOW TABLES' );
+		$profile = $this->job->profile;
+		return array_values(
+			array_filter(
+				$all,
+				function ( $t ) use ( $wpdb, $profile ) {
+					$t = (string) $t;
+					if ( 0 !== strpos( $t, $wpdb->prefix ) ) {
+						return false;
+					}
+					if ( $profile->table_matches_skip( $t ) ) {
+						return false;
+					}
+					return true;
+				}
+			)
+		);
 	}
 
 	private function where_for_table( string $table ): string {

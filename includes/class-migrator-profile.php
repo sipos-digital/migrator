@@ -25,6 +25,9 @@ class Migrator_Profile {
 	/** @var string[] glob patterns (e.g. "uploads/cache/", "uploads/backup-*") */
 	public array $file_excludes = array();
 
+	/** @var string[] fnmatch patterns matched against full table names (e.g. "*wfFileMods", "*woocommerce_sessions") */
+	public array $table_skip_patterns = array();
+
 	public static function from_post( array $post ): self {
 		$p = new self();
 
@@ -53,7 +56,35 @@ class Migrator_Profile {
 			}
 		}
 
+		if ( ! empty( $post['table_skip_patterns'] ) ) {
+			$raw = is_array( $post['table_skip_patterns'] )
+				? implode( "\n", $post['table_skip_patterns'] )
+				: (string) $post['table_skip_patterns'];
+
+			$lines = preg_split( '/\r?\n/', $raw );
+			foreach ( $lines as $line ) {
+				$line = trim( $line );
+				if ( '' !== $line ) {
+					$p->table_skip_patterns[] = $line;
+				}
+			}
+		}
+
 		return $p;
+	}
+
+	/**
+	 * Returns true if the (already-prefixed) table name matches any skip pattern.
+	 * Patterns use fnmatch syntax (* ? [abc]). Matching is case-insensitive
+	 * because Wordfence-style tables use camelCase suffixes (wfFileMods).
+	 */
+	public function table_matches_skip( string $table_name ): bool {
+		foreach ( $this->table_skip_patterns as $pattern ) {
+			if ( fnmatch( $pattern, $table_name, FNM_CASEFOLD ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public static function from_array( array $data ): self {

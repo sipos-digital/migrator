@@ -37,6 +37,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 			<textarea name="file_excludes" rows="4" class="large-text code" placeholder="uploads/cache/&#10;uploads/backup-*"></textarea>
 		</fieldset>
 
+		<fieldset class="migrator-fieldset">
+			<legend><?php esc_html_e( 'Skip database tables', 'migrator' ); ?></legend>
+			<p class="description">
+				<?php esc_html_e( 'One fnmatch pattern per line (case-insensitive). Matched against the full table name including the prefix. Useful for wide, regeneratable plugin tables — Wordfence file/hit/block tables, WooCommerce sessions, action scheduler logs, etc.', 'migrator' ); ?>
+			</p>
+			<textarea name="table_skip_patterns" rows="6" class="large-text code" placeholder="*wfFileMods&#10;*wfHits&#10;*wfBlocks*&#10;*wfLogins&#10;*wfSecurityEvents&#10;*woocommerce_sessions&#10;*actionscheduler_logs"></textarea>
+		</fieldset>
+
 		<p class="submit">
 			<button type="submit" class="button button-primary"><?php esc_html_e( 'Start Export', 'migrator' ); ?></button>
 		</p>
