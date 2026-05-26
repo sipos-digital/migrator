@@ -134,7 +134,8 @@ class Migrator_Exporter {
 
 		fwrite( $handle, "SET FOREIGN_KEY_CHECKS=0;\n\n" );
 
-		$pks    = array();
+		$pks     = array();
+		$max_pks = array();
 		foreach ( $tables as $table ) {
 			$create = $wpdb->get_row( 'SHOW CREATE TABLE `' . esc_sql( $table ) . '`', ARRAY_N );
 			if ( empty( $create[1] ) ) {
@@ -146,19 +147,41 @@ class Migrator_Exporter {
 			// Detect single-column primary key for cursor-based pagination.
 			// Tables with composite or no PK fall back to OFFSET pagination
 			// (much slower on large tables but always correct).
-			$pks[ $table ] = $this->detect_primary_key( $table );
+			$pk            = $this->detect_primary_key( $table );
+			$pks[ $table ] = $pk;
+
+			// Snapshot max PK at dump start. The cursor will cap at this value,
+			// so rows inserted during the dump (e.g. by a concurrent Wordfence
+			// scan filling wfFileMods) don't make us chase a moving tail. Tables
+			// without a usable PK have no cap — they'll see inconsistency on a
+			// live site, but those are rare in WP core.
+			if ( null !== $pk ) {
+				$max = $wpdb->get_var( "SELECT MAX(`" . esc_sql( $pk ) . "`) FROM `" . esc_sql( $table ) . '`' );
+				$max_pks[ $table ] = ( null === $max ) ? null : (string) $max;
+			}
 		}
 		fclose( $handle );
 
-		// Count total rows up-front so progress is meaningful.
+		// Count total rows up-front so progress is meaningful. Use the same
+		// max_pk cap that the dump itself will use, so the count matches what
+		// we will actually export.
 		$total_rows = 0;
 		foreach ( $tables as $table ) {
-			$where        = $this->where_for_table( $table );
-			$sql          = "SELECT COUNT(*) FROM `{$table}`" . ( $where ? " WHERE {$where}" : '' );
+			$where_parts = array();
+			if ( isset( $max_pks[ $table ] ) && null !== $max_pks[ $table ] && isset( $pks[ $table ] ) ) {
+				$where_parts[] = sprintf( "`%s` <= '%s'", $pks[ $table ], esc_sql( $max_pks[ $table ] ) );
+			}
+			$where = $this->where_for_table( $table );
+			if ( $where ) {
+				$where_parts[] = $where;
+			}
+			$where_clause = empty( $where_parts ) ? '' : ' WHERE ' . implode( ' AND ', $where_parts );
+			$sql          = "SELECT COUNT(*) FROM `{$table}`{$where_clause}";
 			$total_rows  += (int) $wpdb->get_var( $sql );
 		}
 		$data['total_rows'] = $total_rows;
 		$data['pks']        = $pks;
+		$data['max_pks']    = $max_pks;
 		$data['last_pks']   = array();
 
 		$this->job->set_phase( 'db_data', $data );
@@ -191,6 +214,7 @@ class Migrator_Exporter {
 		$total_rows   = max( 1, (int) $data['total_rows'] );
 		$pks          = (array) ( $data['pks'] ?? array() );
 		$last_pks     = (array) ( $data['last_pks'] ?? array() );
+		$max_pks      = (array) ( $data['max_pks'] ?? array() );
 
 		if ( $table_index >= count( $tables ) ) {
 			$this->job->set_phase( 'db_attach', $data );
@@ -211,6 +235,12 @@ class Migrator_Exporter {
 			if ( isset( $last_pks[ $table ] ) ) {
 				$where_parts[] = sprintf( "`%s` > '%s'", $pk, esc_sql( (string) $last_pks[ $table ] ) );
 			}
+			// Cap at the max PK we recorded in phase_db_schema. Without this
+			// cap, rows inserted during the dump get pulled in and the dump
+			// never finishes on a live, write-heavy table.
+			if ( isset( $max_pks[ $table ] ) && null !== $max_pks[ $table ] ) {
+				$where_parts[] = sprintf( "`%s` <= '%s'", $pk, esc_sql( (string) $max_pks[ $table ] ) );
+			}
 			if ( $where ) {
 				$where_parts[] = $where;
 			}
@@ -228,10 +258,11 @@ class Migrator_Exporter {
 			$data['row_offset']         = 0;
 			$this->job->state['data']   = $data;
 			$this->job->set_phase( 'db_data', $data );
+			$ratio = min( 0.99, $rows_written / $total_rows );
 			$this->job->update_progress(
-				0.05 + 0.5 * ( $rows_written / $total_rows ),
+				0.05 + 0.5 * $ratio,
 				sprintf( __( 'Finishing table %s', 'migrator' ), $table ),
-				$rows_written / $total_rows
+				$ratio
 			);
 			return;
 		}
@@ -279,12 +310,16 @@ class Migrator_Exporter {
 		}
 		$this->job->state['data'] = $data;
 
-		$overall = 0.05 + 0.5 * ( $data['rows_written'] / $total_rows );
-		$this->job->update_progress(
-			$overall,
-			sprintf( __( 'Dumping %1$s (%2$d / %3$d rows)', 'migrator' ), $table, $data['rows_written'], $total_rows ),
-			$data['rows_written'] / $total_rows
-		);
+		// Clamp the ratio to 99% — total_rows is a snapshot from phase_db_schema,
+		// and on a live site rows added between the COUNT(*) and the dump make
+		// rows_written exceed total_rows. Without the clamp the progress bar
+		// hits 100% while the dump is still running, which looks frozen.
+		$ratio   = min( 0.99, $data['rows_written'] / $total_rows );
+		$overall = 0.05 + 0.5 * $ratio;
+		$label   = $data['rows_written'] > $total_rows
+			? sprintf( __( 'Dumping %1$s (%2$s rows, more than initial estimate)', 'migrator' ), $table, number_format_i18n( $data['rows_written'] ) )
+			: sprintf( __( 'Dumping %1$s (%2$s / %3$s rows)', 'migrator' ), $table, number_format_i18n( $data['rows_written'] ), number_format_i18n( $total_rows ) );
+		$this->job->update_progress( $overall, $label, $ratio );
 	}
 
 	private function phase_db_attach(): void {
