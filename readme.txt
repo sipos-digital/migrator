@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.3.3
+Stable tag: 0.4.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,15 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.4.0 =
+Performance pass for big e-shops (inspired by how All-in-One WP Migration is fast on multi-GB sites).
+
+* Archive entries are now stored uncompressed (`ZipArchive::CM_STORE`) instead of DEFLATE. On media-heavy sites the archive was dominated by uncompressible JPEG/PNG/MP4 anyway; skipping DEFLATE moves the bottleneck from CPU to disk I/O — roughly 4-8x faster export and a slightly larger archive.
+* DB dump now emits **multi-row INSERTs** (`INSERT INTO t VALUES (..), (..), (..);` capped at ~1 MB per statement instead of one INSERT per row). On import this cuts statement-parse overhead by ~100x.
+* DB dump uses **cursor pagination** (`WHERE pk > last_pk ORDER BY pk LIMIT N`) instead of `LIMIT N OFFSET M` when a single-column primary key is detected. OFFSET is O(page * batch) so the 400 000th row on a million-row table was ~400x slower than the first. Cursor stays O(log N) regardless of position.
+* Literal `\r` / `\n` in row values are now escaped to MySQL's `\r` / `\n` sequences so multi-row INSERTs always stay on one physical line — the importer's line-based parser depends on that.
+* Batch sizes bumped now that each step does much more work per row: export 2000 rows/step + 200 files/step, import 500 statements/step + 200 files/step.
 
 = 0.3.3 =
 * Fix: archive download no longer fatals on large exports. `readfile()` was running with WP's accumulated output buffers and zlib compression still active, so multi-MB archives were buffered into memory and tripped `memory_limit`. The resulting PHP fatal produced the WordPress "critical error" HTML page, which the browser then saved with a `.zip` extension (because `Content-Disposition` was already set). The download is now streamed in 1 MB chunks with all output buffering, gzip, and mod_deflate explicitly disabled — flat memory profile regardless of archive size.

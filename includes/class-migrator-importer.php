@@ -18,8 +18,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class Migrator_Importer {
 
-	const DB_BATCH_ROWS = 200;
-	const FILE_BATCH    = 50;
+	const DB_BATCH_ROWS = 500;   // statements per step — each statement is now a multi-row INSERT, so this is many more rows than the old per-row layout
+	const FILE_BATCH    = 200;
 
 	private Migrator_Job $job;
 

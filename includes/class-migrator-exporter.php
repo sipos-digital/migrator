@@ -23,9 +23,10 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Migrator_Exporter {
 
 	const MANIFEST_FILE  = 'migrator-manifest.json';
-	const DB_FILE        = 'database.sql';
-	const DB_BATCH_ROWS  = 500;
-	const FILE_BATCH     = 50;
+	const DB_FILE              = 'database.sql';
+	const DB_BATCH_ROWS        = 2000;
+	const FILE_BATCH           = 200;
+	const INSERT_TARGET_BYTES  = 1048576; // ~1 MB per multi-row INSERT — well under MySQL's 64 MB max_allowed_packet
 
 	private Migrator_Job $job;
 
@@ -132,6 +133,8 @@ class Migrator_Exporter {
 		}
 
 		fwrite( $handle, "SET FOREIGN_KEY_CHECKS=0;\n\n" );
+
+		$pks    = array();
 		foreach ( $tables as $table ) {
 			$create = $wpdb->get_row( 'SHOW CREATE TABLE `' . esc_sql( $table ) . '`', ARRAY_N );
 			if ( empty( $create[1] ) ) {
@@ -139,6 +142,11 @@ class Migrator_Exporter {
 			}
 			fwrite( $handle, "DROP TABLE IF EXISTS `{$table}`;\n" );
 			fwrite( $handle, $create[1] . ";\n\n" );
+
+			// Detect single-column primary key for cursor-based pagination.
+			// Tables with composite or no PK fall back to OFFSET pagination
+			// (much slower on large tables but always correct).
+			$pks[ $table ] = $this->detect_primary_key( $table );
 		}
 		fclose( $handle );
 
@@ -150,9 +158,27 @@ class Migrator_Exporter {
 			$total_rows  += (int) $wpdb->get_var( $sql );
 		}
 		$data['total_rows'] = $total_rows;
+		$data['pks']        = $pks;
+		$data['last_pks']   = array();
 
 		$this->job->set_phase( 'db_data', $data );
 		$this->job->update_progress( 0.05, __( 'Schema written', 'migrator' ), 1.0 );
+	}
+
+	/**
+	 * Return the column name of the single-column primary key for $table,
+	 * or null if the PK is composite / missing.
+	 */
+	private function detect_primary_key( string $table ): ?string {
+		global $wpdb;
+		$keys = $wpdb->get_results(
+			'SHOW KEYS FROM `' . esc_sql( $table ) . "` WHERE Key_name = 'PRIMARY'",
+			ARRAY_A
+		);
+		if ( empty( $keys ) || count( $keys ) > 1 ) {
+			return null;
+		}
+		return (string) $keys[0]['Column_name'];
 	}
 
 	private function phase_db_data(): void {
@@ -163,6 +189,8 @@ class Migrator_Exporter {
 		$row_offset   = (int) $data['row_offset'];
 		$rows_written = (int) $data['rows_written'];
 		$total_rows   = max( 1, (int) $data['total_rows'] );
+		$pks          = (array) ( $data['pks'] ?? array() );
+		$last_pks     = (array) ( $data['last_pks'] ?? array() );
 
 		if ( $table_index >= count( $tables ) ) {
 			$this->job->set_phase( 'db_attach', $data );
@@ -170,19 +198,35 @@ class Migrator_Exporter {
 			return;
 		}
 
-		$table       = $tables[ $table_index ];
-		$where       = $this->where_for_table( $table );
-		$where_sql   = $where ? " WHERE {$where}" : '';
-		$batch       = self::DB_BATCH_ROWS;
+		$table = $tables[ $table_index ];
+		$pk    = $pks[ $table ] ?? null;
+		$where = $this->where_for_table( $table );
+		$batch = self::DB_BATCH_ROWS;
 
-		$rows = $wpdb->get_results(
-			"SELECT * FROM `{$table}`{$where_sql} LIMIT {$batch} OFFSET {$row_offset}",
-			ARRAY_A
-		);
+		// Cursor-based pagination is O(log N) per page on indexed PK; OFFSET
+		// pagination is O(page * batch). For million-row tables the difference
+		// is enormous.
+		if ( null !== $pk ) {
+			$where_parts = array();
+			if ( isset( $last_pks[ $table ] ) ) {
+				$where_parts[] = sprintf( "`%s` > '%s'", $pk, esc_sql( (string) $last_pks[ $table ] ) );
+			}
+			if ( $where ) {
+				$where_parts[] = $where;
+			}
+			$where_clause = empty( $where_parts ) ? '' : ' WHERE ' . implode( ' AND ', $where_parts );
+			$sql          = "SELECT * FROM `{$table}`{$where_clause} ORDER BY `{$pk}` ASC LIMIT {$batch}";
+		} else {
+			$where_clause = $where ? " WHERE {$where}" : '';
+			$sql          = "SELECT * FROM `{$table}`{$where_clause} LIMIT {$batch} OFFSET {$row_offset}";
+		}
+
+		$rows = $wpdb->get_results( $sql, ARRAY_A );
 
 		if ( empty( $rows ) ) {
-			$data['table_index'] = $table_index + 1;
-			$data['row_offset']  = 0;
+			$data['table_index']        = $table_index + 1;
+			$data['row_offset']         = 0;
+			$this->job->state['data']   = $data;
 			$this->job->set_phase( 'db_data', $data );
 			$this->job->update_progress(
 				0.05 + 0.5 * ( $rows_written / $total_rows ),
@@ -197,25 +241,42 @@ class Migrator_Exporter {
 			throw new RuntimeException( __( 'Could not open database.sql for writing.', 'migrator' ) );
 		}
 
-		$columns      = array_keys( $rows[0] );
-		$columns_list = '`' . implode( '`, `', $columns ) . '`';
+		$columns       = array_keys( $rows[0] );
+		$columns_list  = '`' . implode( '`, `', $columns ) . '`';
+		$insert_prefix = "INSERT INTO `{$table}` ({$columns_list}) VALUES ";
 
+		// Group rows into multi-row INSERTs ~1 MB each. On import this reduces
+		// statement-parse overhead by ~100x vs one INSERT per row.
+		$current_values = '';
+		$current_size   = 0;
 		foreach ( $rows as $row ) {
-			$values = array();
-			foreach ( $row as $value ) {
-				if ( null === $value ) {
-					$values[] = 'NULL';
-				} else {
-					$values[] = "'" . esc_sql( $value ) . "'";
-				}
+			$values_str = '(' . $this->row_to_sql_values( $row ) . ')';
+			$value_size = strlen( $values_str ) + 1; // + comma
+
+			if ( $current_size > 0 && $current_size + $value_size > self::INSERT_TARGET_BYTES ) {
+				fwrite( $handle, $insert_prefix . $current_values . ";\n" );
+				$current_values = $values_str;
+				$current_size   = $value_size;
+			} else {
+				$current_values .= ( '' === $current_values ? '' : ',' ) . $values_str;
+				$current_size   += $value_size;
 			}
-			fwrite( $handle, "INSERT INTO `{$table}` ({$columns_list}) VALUES (" . implode( ', ', $values ) . ");\n" );
+		}
+		if ( '' !== $current_values ) {
+			fwrite( $handle, $insert_prefix . $current_values . ";\n" );
 		}
 		fclose( $handle );
 
-		$batch_count             = count( $rows );
-		$data['row_offset']      = $row_offset + $batch_count;
-		$data['rows_written']    = $rows_written + $batch_count;
+		$batch_count          = count( $rows );
+		$data['row_offset']   = $row_offset + $batch_count;
+		$data['rows_written'] = $rows_written + $batch_count;
+
+		// Advance cursor for next step.
+		if ( null !== $pk ) {
+			$last_row              = end( $rows );
+			$last_pks[ $table ]    = $last_row[ $pk ];
+			$data['last_pks']      = $last_pks;
+		}
 		$this->job->state['data'] = $data;
 
 		$overall = 0.05 + 0.5 * ( $data['rows_written'] / $total_rows );
@@ -233,6 +294,11 @@ class Migrator_Exporter {
 
 		$zip = $this->open_archive_for_write();
 		$zip->addFile( $this->job->sql_path(), self::DB_FILE );
+		// Store-only: SQL dumps compress well, but for media-heavy sites the
+		// archive is dominated by uncompressible JPEG/PNG/MP4 anyway. Skipping
+		// DEFLATE everywhere keeps the CPU profile flat — the bottleneck on
+		// large exports moves from CPU to disk I/O.
+		$zip->setCompressionName( self::DB_FILE, ZipArchive::CM_STORE );
 		$zip->close();
 
 		$data = $this->job->state['data'];
@@ -283,6 +349,8 @@ class Migrator_Exporter {
 			list( $absolute, $zip_path ) = explode( '|', $line, 2 );
 			if ( file_exists( $absolute ) && is_file( $absolute ) ) {
 				$zip->addFile( $absolute, $zip_path );
+				// Store-only — see phase_db_attach for rationale.
+				$zip->setCompressionName( $zip_path, ZipArchive::CM_STORE );
 			}
 			$processed++;
 		}
@@ -316,6 +384,7 @@ class Migrator_Exporter {
 			$zip->close();
 			throw new RuntimeException( __( 'Could not add migrator-manifest.json to archive.', 'migrator' ) );
 		}
+		$zip->setCompressionName( self::MANIFEST_FILE, ZipArchive::CM_STORE );
 		if ( ! $zip->close() ) {
 			throw new RuntimeException( __( 'Could not finalize archive.', 'migrator' ) );
 		}
@@ -420,6 +489,26 @@ class Migrator_Exporter {
 
 	private function sql_header(): string {
 		return "-- Migrator database export\n-- Generated: " . gmdate( 'c' ) . "\n\n";
+	}
+
+	/**
+	 * Serialize one row's values as SQL: NULLs preserved, strings escaped via
+	 * esc_sql, then literal CR/LF replaced with the MySQL \r / \n escape
+	 * sequences so the entire INSERT remains on a single physical line in the
+	 * dump file. The importer's line-based parser depends on that.
+	 */
+	private function row_to_sql_values( array $row ): string {
+		$values = array();
+		foreach ( $row as $value ) {
+			if ( null === $value ) {
+				$values[] = 'NULL';
+			} else {
+				$escaped  = esc_sql( $value );
+				$escaped  = str_replace( array( "\r\n", "\r", "\n" ), array( '\\n', '\\r', '\\n' ), $escaped );
+				$values[] = "'" . $escaped . "'";
+			}
+		}
+		return implode( ',', $values );
 	}
 
 	/**
