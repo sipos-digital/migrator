@@ -55,10 +55,11 @@
 					try {
 						return JSON.parse(text);
 					} catch (parseErr) {
-						console.error('[Migrator] JSON parse failed for', action, 'body was:', text.slice(0, 500), parseErr);
-						// Detect the most common cause of an HTML response: PHP rejecting
-						// the request body up-front because it exceeds post_max_size. Show
-						// a friendlier message than 'Unrecognized token <'.
+						console.error('[Migrator] JSON parse failed for', action, 'HTTP', r.status, 'body was:', text.slice(0, 500), parseErr);
+						// Detect the most common causes of an HTML response.
+						if (r.status === 413 || /413 Request Entity Too Large|client intended to send too large body/i.test(text)) {
+							throw new Error(cfg.i18n.nginxTooLarge || 'Nginx rejected the chunk: Request Entity Too Large.');
+						}
 						if (/POST Content-Length of \d+ bytes exceeds the limit/i.test(text)) {
 							throw new Error(cfg.i18n.postTooLarge || 'Upload chunk exceeds PHP post_max_size.');
 						}

@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.5.0
+Stable tag: 0.5.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.5.1 =
+* Fix: upload chunk size is now capped at 1.5 MB regardless of PHP's `post_max_size`. PHP commonly allows 256 MB POSTs but nginx vhosts often limit `client_max_body_size` to 2 MB (Herd's default), so chunks sized purely from PHP limits got rejected by nginx with `413 Request Entity Too Large` before reaching PHP — surfacing in the browser as "JSON Parse error: Unrecognized token '<'". The ceiling is overridable via `define( 'MIGRATOR_CHUNK_BYTES_MAX', 8388608 );` in `wp-config.php` for sites with raised nginx limits.
+* The importer now recognises HTTP 413 / nginx's "Request Entity Too Large" response body and shows an actionable error message instead of a cryptic JSON parse failure.
 
 = 0.5.0 =
 * New: "Skip database tables" textarea in the Export profile. Accepts one fnmatch glob per line (case-insensitive), matched against the full table name including the prefix. Skipped tables are removed before `list_tables()` returns, so they never reach `COUNT(*)`, `SHOW CREATE TABLE`, or the dump. Useful for wide, regeneratable plugin tables (Wordfence's `*wfFileMods` / `*wfHits` / `*wfBlocks*` / `*wfLogins` / `*wfSecurityEvents`, WooCommerce's `*woocommerce_sessions`, ActionScheduler's `*actionscheduler_logs`) which the target site will rebuild on its own.

@@ -67,8 +67,17 @@ class Migrator_Admin {
 		$post_max   = self::ini_bytes( 'post_max_size' );
 		$upload_max = self::ini_bytes( 'upload_max_filesize' );
 		$limit      = min( array_filter( array( $post_max, $upload_max ) ) ) ?: 2097152;
-		// Reserve ~30% of the limit for FormData overhead (boundaries, fields, headers).
+		// Reserve ~30% of the PHP limit for FormData overhead (boundaries, fields, headers).
 		$chunk_bytes = max( 262144, (int) ( $limit * 0.7 ) );
+
+		// Hard ceiling — Herd's default nginx vhost has client_max_body_size 2M,
+		// which is BELOW most PHP post_max_size settings (typically 256M).
+		// Sending PHP-sized chunks gets the request rejected by nginx with a 413
+		// before it ever reaches PHP, producing an HTML error page that the
+		// importer's JSON parser can't read. 1.5 MB leaves headroom even on
+		// stricter nginx configs and FormData overhead.
+		$max_ceiling = defined( 'MIGRATOR_CHUNK_BYTES_MAX' ) ? (int) MIGRATOR_CHUNK_BYTES_MAX : 1500000;
+		$chunk_bytes = min( $chunk_bytes, $max_ceiling );
 
 		wp_localize_script(
 			'migrator-admin',
@@ -90,6 +99,7 @@ class Migrator_Admin {
 					'noFile'         => __( 'Please choose an archive to import.', 'migrator' ),
 					'uploadComplete' => __( 'Upload complete', 'migrator' ),
 					'postTooLarge'   => __( 'The server rejected the upload chunk because it exceeds PHP\'s post_max_size. Increase post_max_size / upload_max_filesize in php.ini and try again.', 'migrator' ),
+					'nginxTooLarge'  => __( 'Nginx rejected the upload chunk (Request Entity Too Large). Raise client_max_body_size in this site\'s nginx vhost, or define MIGRATOR_CHUNK_BYTES_MAX in wp-config.php to lower the chunk size.', 'migrator' ),
 				),
 			)
 		);
