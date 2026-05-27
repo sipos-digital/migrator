@@ -40,6 +40,10 @@ class Migrator_Exporter {
 	public function step(): array {
 		$phase = $this->job->state['phase'] ?? 'init';
 
+		// Enable PCRE JIT for this request. Herd ships with `pcre.jit=0` —
+		// big win if any future export-side code grows regex-heavy.
+		@ini_set( 'pcre.jit', '1' );
+
 		try {
 			switch ( $phase ) {
 				case 'init':

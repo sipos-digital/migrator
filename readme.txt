@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.7.1
+Stable tag: 0.7.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.7.2 =
+* Fix: another nginx 502 in `sql_rewrite` on large dumps. Herd ships with `pcre.jit=0` in php.ini, which makes `preg_replace_callback` on the URL/prefix rewrite roughly 10x slower than with JIT enabled. The importer (and exporter) now run `ini_set( 'pcre.jit', '1' )` at the start of each AJAX step so the rewrite uses JIT for this one request without changing system config.
+* Time-budget check now fires every line instead of every 8/64 lines. A single 1 MB multi-row INSERT was enough to keep us past PHP-FPM's `request_terminate_timeout` without ever triggering the previous coarse check.
 
 = 0.7.1 =
 * Fix: import step that finished the extract phase (and then synchronously ran the URL + table-prefix rewrite across the full SQL dump) could exceed PHP-FPM's `request_terminate_timeout` on multi-GB sites, producing an nginx 502. The rewrite now runs in its own resumable phase (`sql_rewrite`) between `extract` and `files_copy`, processing the file line-by-line with a 15-second wall-clock budget per AJAX step. Progress is reported as MB / total MB.

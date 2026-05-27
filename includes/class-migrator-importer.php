@@ -31,6 +31,13 @@ class Migrator_Importer {
 	public function step(): array {
 		$phase = $this->job->state['phase'] ?? 'init';
 
+		// Enable PCRE JIT for this request. Herd ships with `pcre.jit=0` in
+		// php.ini, which makes preg_replace_callback an order of magnitude
+		// slower on the URL+prefix rewrite of a multi-MB SQL dump (~10x).
+		// pcre.jit is INI_ALL on PHP 8.x; the previous value is restored
+		// automatically when the request ends.
+		@ini_set( 'pcre.jit', '1' );
+
 		try {
 			switch ( $phase ) {
 				case 'init':
@@ -314,9 +321,13 @@ class Migrator_Importer {
 			fwrite( $out, $line );
 			$lines++;
 
-			// Check time budget every 64 lines so the microtime() call doesn't
-			// dominate when lines are tiny.
-			if ( 0 === ( $lines & 63 ) && ( microtime( true ) - $start ) > self::STEP_BUDGET ) {
+			// Check time budget every line. Individual lines can be ~1 MB
+			// (multi-row INSERT cap) and rewrite_serialized on them is
+			// non-trivial — checking only every Nth line means a single slow
+			// line can keep us past PHP-FPM's request_terminate_timeout
+			// without ever triggering the budget. microtime() per line is
+			// ~100 ns, dwarfed by the regex cost on any line that matters.
+			if ( ( microtime( true ) - $start ) > self::STEP_BUDGET ) {
 				break;
 			}
 		}
