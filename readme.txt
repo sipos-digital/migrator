@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.5.1
+Stable tag: 0.6.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,9 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.6.0 =
+* The importer now **remaps the table prefix** during import instead of refusing the import on mismatch. Previously you had to edit `$table_prefix` in `wp-config.php` on the target before running the import; now the SQL dump is streamed through an extra pass that rewrites `` `<source_prefix>X` `` → `` `<target_prefix>X` `` in table identifiers and `<source_prefix>X` → `<target_prefix>X` in prefix-keyed values (option_name like `<prefix>_user_roles`). Serialized PHP strings are length-corrected too. URL rewriting and prefix rewriting run in a single line-by-line pass over the dump so the cost is the same as before.
 
 = 0.5.1 =
 * Fix: upload chunk size is now capped at 1.5 MB regardless of PHP's `post_max_size`. PHP commonly allows 256 MB POSTs but nginx vhosts often limit `client_max_body_size` to 2 MB (Herd's default), so chunks sized purely from PHP limits got rejected by nginx with `413 Request Entity Too Large` before reaching PHP — surfacing in the browser as "JSON Parse error: Unrecognized token '<'". The ceiling is overridable via `define( 'MIGRATOR_CHUNK_BYTES_MAX', 8388608 );` in `wp-config.php` for sites with raised nginx limits.

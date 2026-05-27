@@ -121,22 +121,11 @@ class Migrator_Importer {
 			throw new RuntimeException( __( 'Manifest is invalid.', 'migrator' ) );
 		}
 
-		// Refuse to import across mismatched WordPress table prefixes — the
-		// imported tables would live alongside the active ones rather than
-		// replacing them, and operator preservation would write to the wrong
-		// set. The user must align $table_prefix in wp-config.php first.
+		// Cross-prefix imports are supported by rewriting the source prefix
+		// to the target prefix in the SQL dump (see after_extract). Both
+		// table identifiers in backticks and prefix-prefixed option_name
+		// values like `nast_2642024a_user_roles` get rewritten.
 		global $wpdb;
-		if ( ! empty( $manifest['table_prefix'] ) && $manifest['table_prefix'] !== $wpdb->prefix ) {
-			$zip->close();
-			throw new RuntimeException(
-				sprintf(
-					/* translators: 1: source prefix, 2: target prefix */
-					__( 'Table prefix mismatch: archive was created with prefix "%1$s" but this site uses "%2$s". Update $table_prefix in wp-config.php on this site to "%1$s" and try again.', 'migrator' ),
-					$manifest['table_prefix'],
-					$wpdb->prefix
-				)
-			);
-		}
 
 		// Prefix = wrapper directory inside the zip (empty string for archives
 		// produced by Migrator itself; "migrator-foo-20260522-202439/" for
@@ -233,12 +222,33 @@ class Migrator_Importer {
 		// to include them.
 		$sql_file = $base . '/' . Migrator_Exporter::DB_FILE;
 		if ( file_exists( $sql_file ) ) {
+			global $wpdb;
 			$manifest = (array) $data['manifest'];
-			$old_url  = untrailingslashit( (string) $manifest['site_url'] );
-			$new_url  = untrailingslashit( (string) $data['new_url'] );
+
+			$rewrites = array();
+
+			// URL rewrite: source site URL → target site URL.
+			$old_url = untrailingslashit( (string) $manifest['site_url'] );
+			$new_url = untrailingslashit( (string) $data['new_url'] );
 			if ( $old_url !== $new_url ) {
-				$this->rewrite_urls_in_file( $sql_file, $old_url, $new_url );
+				$rewrites[] = array( 'old' => $old_url, 'new' => $new_url, 'serialized' => true );
 			}
+
+			// Prefix rewrite: source $table_prefix → target $wpdb->prefix.
+			// Rewrites both table identifiers in backticks (`old_X` → `new_X`)
+			// and prefix-keyed option_name values ('old_user_roles' →
+			// 'new_user_roles'). With serialized=true we also fix s:N: byte
+			// lengths if the prefix happens to appear inside serialized data.
+			$source_prefix = (string) ( $manifest['table_prefix'] ?? '' );
+			$target_prefix = (string) $wpdb->prefix;
+			if ( '' !== $source_prefix && $source_prefix !== $target_prefix ) {
+				$rewrites[] = array( 'old' => $source_prefix, 'new' => $target_prefix, 'serialized' => true );
+			}
+
+			if ( ! empty( $rewrites ) ) {
+				$this->rewrite_sql_file( $sql_file, $rewrites );
+			}
+
 			$data['sql_total']  = filesize( $sql_file );
 			$data['sql_offset'] = 0;
 			$data['has_sql']    = true;
@@ -479,15 +489,23 @@ class Migrator_Importer {
 	}
 
 	/**
-	 * Rewrite URLs in the SQL dump, handling PHP-serialized strings safely.
+	 * Apply one or more search-replace passes to the SQL dump.
 	 *
-	 * Streams the file line by line into a tmp file, then renames over the
+	 * Each entry in $rewrites: { 'old' => string, 'new' => string, 'serialized' => bool }
+	 *
+	 * Streams the file line by line into a tmp file then renames over the
 	 * original. Per-line processing bounds both memory use and regex scope —
 	 * each INSERT in our own dumps lives on a single line, so serialized
 	 * blobs never get split mid-stream.
 	 */
-	private function rewrite_urls_in_file( string $path, string $old, string $new ): void {
-		if ( $old === $new ) {
+	private function rewrite_sql_file( string $path, array $rewrites ): void {
+		$rewrites = array_values(
+			array_filter(
+				$rewrites,
+				fn( $r ) => ! empty( $r['old'] ) && $r['old'] !== ( $r['new'] ?? '' )
+			)
+		);
+		if ( empty( $rewrites ) ) {
 			return;
 		}
 
@@ -501,12 +519,16 @@ class Migrator_Importer {
 			if ( $out ) {
 				fclose( $out );
 			}
-			throw new RuntimeException( __( 'Could not open SQL dump for URL rewriting.', 'migrator' ) );
+			throw new RuntimeException( __( 'Could not open SQL dump for rewriting.', 'migrator' ) );
 		}
 
 		while ( false !== ( $line = fgets( $in ) ) ) {
-			$line = $this->rewrite_serialized( $line, $old, $new );
-			$line = str_replace( $old, $new, $line );
+			foreach ( $rewrites as $r ) {
+				if ( ! empty( $r['serialized'] ) ) {
+					$line = $this->rewrite_serialized( $line, $r['old'], $r['new'] );
+				}
+				$line = str_replace( $r['old'], $r['new'], $line );
+			}
 			fwrite( $out, $line );
 		}
 
@@ -515,7 +537,7 @@ class Migrator_Importer {
 
 		if ( ! rename( $tmp, $path ) ) {
 			@unlink( $tmp );
-			throw new RuntimeException( __( 'Could not finalize URL rewriting.', 'migrator' ) );
+			throw new RuntimeException( __( 'Could not finalize SQL rewriting.', 'migrator' ) );
 		}
 	}
 
