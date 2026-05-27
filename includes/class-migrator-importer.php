@@ -20,6 +20,7 @@ class Migrator_Importer {
 
 	const DB_BATCH_ROWS = 500;   // statements per step — each statement is now a multi-row INSERT, so this is many more rows than the old per-row layout
 	const FILE_BATCH    = 200;
+	const STEP_BUDGET   = 15.0;  // hard cap on wall-clock per step; well under PHP-FPM's default request_terminate_timeout
 
 	private Migrator_Job $job;
 
@@ -37,6 +38,9 @@ class Migrator_Importer {
 					break;
 				case 'extract':
 					$this->phase_extract();
+					break;
+				case 'sql_rewrite':
+					$this->phase_sql_rewrite();
 					break;
 				case 'db_restore':
 					$this->phase_db_restore();
@@ -245,18 +249,109 @@ class Migrator_Importer {
 				$rewrites[] = array( 'old' => $source_prefix, 'new' => $target_prefix, 'serialized' => true );
 			}
 
+			$data['has_sql'] = true;
+
 			if ( ! empty( $rewrites ) ) {
-				$this->rewrite_sql_file( $sql_file, $rewrites );
+				// Hand off to phase_sql_rewrite. The rewrite is its own phase
+				// instead of a synchronous call in after_extract because the
+				// dump can be 100+ MB and a single sync pass blows past
+				// PHP-FPM's request_terminate_timeout (→ nginx 502).
+				$data['sql_file']       = $sql_file;
+				$data['rewrites']       = $rewrites;
+				$data['rewrite_offset'] = 0;
+				$data['rewrite_total']  = filesize( $sql_file );
+				$this->job->set_phase( 'sql_rewrite', $data );
+				$this->job->update_progress( 0.31, __( 'Rewriting URLs and table prefix', 'migrator' ), 0.0 );
+				return;
 			}
 
 			$data['sql_total']  = filesize( $sql_file );
 			$data['sql_offset'] = 0;
-			$data['has_sql']    = true;
 		} else {
 			$data['has_sql'] = false;
 		}
 
 		$this->prepare_files_copy_phase( $data );
+	}
+
+	private function phase_sql_rewrite(): void {
+		$data     = $this->job->state['data'];
+		$sql_file = (string) ( $data['sql_file'] ?? '' );
+		$rewrites = (array) ( $data['rewrites'] ?? array() );
+		$offset   = (int) ( $data['rewrite_offset'] ?? 0 );
+		$total    = max( 1, (int) ( $data['rewrite_total'] ?? 0 ) );
+
+		if ( '' === $sql_file || ! file_exists( $sql_file ) ) {
+			throw new RuntimeException( __( 'SQL file disappeared before rewrite.', 'migrator' ) );
+		}
+
+		$tmp = $sql_file . '.rewriting';
+		$in  = fopen( $sql_file, 'r' );
+		$out = fopen( $tmp, 0 === $offset ? 'w' : 'a' );
+		if ( false === $in || false === $out ) {
+			if ( $in ) {
+				fclose( $in );
+			}
+			if ( $out ) {
+				fclose( $out );
+			}
+			throw new RuntimeException( __( 'Could not open SQL files for rewriting.', 'migrator' ) );
+		}
+
+		if ( $offset > 0 ) {
+			fseek( $in, $offset );
+		}
+
+		$start = microtime( true );
+		$lines = 0;
+		while ( false !== ( $line = fgets( $in ) ) ) {
+			foreach ( $rewrites as $r ) {
+				if ( ! empty( $r['serialized'] ) ) {
+					$line = $this->rewrite_serialized( $line, $r['old'], $r['new'] );
+				}
+				$line = str_replace( $r['old'], $r['new'], $line );
+			}
+			fwrite( $out, $line );
+			$lines++;
+
+			// Check time budget every 64 lines so the microtime() call doesn't
+			// dominate when lines are tiny.
+			if ( 0 === ( $lines & 63 ) && ( microtime( true ) - $start ) > self::STEP_BUDGET ) {
+				break;
+			}
+		}
+
+		$new_offset = ftell( $in );
+		$eof        = feof( $in );
+		fclose( $in );
+		fclose( $out );
+
+		if ( $eof ) {
+			if ( ! rename( $tmp, $sql_file ) ) {
+				@unlink( $tmp );
+				throw new RuntimeException( __( 'Could not finalize SQL rewriting.', 'migrator' ) );
+			}
+			unset( $data['rewrites'], $data['sql_file'], $data['rewrite_offset'], $data['rewrite_total'] );
+			$data['sql_total']  = filesize( $sql_file );
+			$data['sql_offset'] = 0;
+			$this->prepare_files_copy_phase( $data );
+			return;
+		}
+
+		$data['rewrite_offset']   = $new_offset;
+		$this->job->state['data'] = $data;
+
+		$ratio = $new_offset / $total;
+		$this->job->update_progress(
+			0.31 + 0.04 * $ratio,
+			sprintf(
+				/* translators: 1: MB processed, 2: total MB */
+				__( 'Rewriting SQL dump (%1$s / %2$s MB)', 'migrator' ),
+				number_format_i18n( $new_offset / 1048576, 1 ),
+				number_format_i18n( $total / 1048576, 1 )
+			),
+			$ratio
+		);
 	}
 
 	private function phase_db_restore(): void {
@@ -286,10 +381,13 @@ class Migrator_Importer {
 
 		$wpdb->query( 'SET FOREIGN_KEY_CHECKS=0' );
 
+		$start      = microtime( true );
 		$statements = 0;
 		$skipped    = 0;
 		$buffer     = '';
-		while ( $statements < self::DB_BATCH_ROWS && false !== ( $line = fgets( $handle ) ) ) {
+		while ( $statements < self::DB_BATCH_ROWS
+			&& ( microtime( true ) - $start ) < self::STEP_BUDGET
+			&& false !== ( $line = fgets( $handle ) ) ) {
 			$buffer .= $line;
 			if ( preg_match( '/;\s*$/', $line ) ) {
 				$statement = trim( $buffer );
@@ -398,8 +496,11 @@ class Migrator_Importer {
 			}
 		}
 
+		$start     = microtime( true );
 		$processed = 0;
-		while ( $processed < self::FILE_BATCH && false !== ( $line = fgets( $handle ) ) ) {
+		while ( $processed < self::FILE_BATCH
+			&& ( microtime( true ) - $start ) < self::STEP_BUDGET
+			&& false !== ( $line = fgets( $handle ) ) ) {
 			$line = trim( $line );
 			if ( '' === $line ) {
 				continue;

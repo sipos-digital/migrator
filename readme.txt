@@ -4,7 +4,7 @@ Tags: migration, backup, export, import, clone
 Requires at least: 5.8
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 0.7.0
+Stable tag: 0.7.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -42,6 +42,10 @@ Not in this version. Only the database and uploads directory are bundled.
 Yes — the import drops and recreates the WordPress tables and copies media files into `wp-content/uploads`. Back up first.
 
 == Changelog ==
+
+= 0.7.1 =
+* Fix: import step that finished the extract phase (and then synchronously ran the URL + table-prefix rewrite across the full SQL dump) could exceed PHP-FPM's `request_terminate_timeout` on multi-GB sites, producing an nginx 502. The rewrite now runs in its own resumable phase (`sql_rewrite`) between `extract` and `files_copy`, processing the file line-by-line with a 15-second wall-clock budget per AJAX step. Progress is reported as MB / total MB.
+* Added the same 15-second time budget to `db_restore` and `files_copy` loops so individual steps can never overrun PHP-FPM regardless of how big a particular multi-row INSERT or a single uploaded file turns out to be.
 
 = 0.7.0 =
 * New: drop large archives into `wp-content/uploads/migrator/incoming/` via FTP / SCP / Finder and pick them from a dropdown on the Import screen. The browser's chunked HTTP upload phase is skipped entirely — the archive is symlinked (or copied as a fallback) into the job directory, and the original file in `incoming/` is preserved across the import. Multi-GB imports go from "many minutes over HTTP" to "instant". The dropdown lives next to the file input; if no pre-uploaded archive is selected, the browser upload behaves exactly as before.
