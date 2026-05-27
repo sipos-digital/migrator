@@ -13,12 +13,40 @@ if ( ! defined( 'ABSPATH' ) ) {
 	<h1><?php esc_html_e( 'Migrator – Import', 'migrator' ); ?></h1>
 	<p><?php esc_html_e( 'Upload a Migrator archive to restore the database and files. This will overwrite existing data — back up first.', 'migrator' ); ?></p>
 
+	<?php
+	$incoming_files = Migrator_Admin::list_incoming_files();
+	$incoming_dir   = Migrator_Admin::incoming_dir();
+	?>
 	<form id="migrator-import-form" class="migrator-form" novalidate>
 		<table class="form-table" role="presentation">
 			<tr>
-				<th scope="row"><label for="migrator_archive"><?php esc_html_e( 'Archive (.zip)', 'migrator' ); ?></label></th>
+				<th scope="row"><label for="migrator_incoming"><?php esc_html_e( 'Pre-uploaded archive', 'migrator' ); ?></label></th>
+				<td>
+					<select id="migrator_incoming" name="incoming_file" class="regular-text">
+						<option value=""><?php esc_html_e( '— upload via browser below —', 'migrator' ); ?></option>
+						<?php foreach ( $incoming_files as $f ) : ?>
+							<option value="<?php echo esc_attr( $f ); ?>"><?php echo esc_html( $f ); ?></option>
+						<?php endforeach; ?>
+					</select>
+					<p class="description">
+						<?php
+						printf(
+							/* translators: %s: filesystem path to the incoming directory */
+							esc_html__( 'For large archives, copy the .zip directly into this directory via Finder / FTP / SCP — much faster than uploading through the browser. Then refresh this page and pick it from the dropdown. Directory: %s', 'migrator' ),
+							'<code>' . esc_html( $incoming_dir ) . '/</code>'
+						);
+						?>
+					</p>
+					<?php if ( empty( $incoming_files ) ) : ?>
+						<p class="description"><em><?php esc_html_e( 'The directory is currently empty.', 'migrator' ); ?></em></p>
+					<?php endif; ?>
+				</td>
+			</tr>
+			<tr>
+				<th scope="row"><label for="migrator_archive"><?php esc_html_e( 'Or upload from browser', 'migrator' ); ?></label></th>
 				<td>
 					<input type="file" id="migrator_archive" name="migrator_archive" />
+					<p class="description"><?php esc_html_e( 'Used only if no pre-uploaded archive is selected above.', 'migrator' ); ?></p>
 				</td>
 			</tr>
 			<tr>

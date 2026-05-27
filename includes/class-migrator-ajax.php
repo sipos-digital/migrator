@@ -111,18 +111,46 @@ class Migrator_Ajax {
 			wp_send_json_error( array( 'message' => $e->getMessage() ), 500 );
 		}
 
-		// Initialize an empty archive file we'll append chunks to.
-		file_put_contents( $job->archive_path(), '' );
+		$source = 'upload';
+		$incoming = sanitize_file_name( (string) wp_unslash( $_POST['incoming_file'] ?? '' ) );
+		if ( '' !== $incoming ) {
+			$src = Migrator_Admin::incoming_dir() . '/' . $incoming;
+			// Belt-and-braces: sanitize_file_name strips path components, but
+			// double-check the resolved path is inside the incoming dir.
+			$real = realpath( $src );
+			$dir_real = realpath( Migrator_Admin::incoming_dir() );
+			if ( false === $real || false === $dir_real || 0 !== strpos( $real, $dir_real . DIRECTORY_SEPARATOR ) ) {
+				$job->destroy();
+				wp_send_json_error( array( 'message' => __( 'Incoming file not found.', 'migrator' ) ), 404 );
+			}
+			// Symlink (O(1)) when possible; fall back to copy on Windows or
+			// filesystems where symlink fails. Either way the original file in
+			// the incoming/ dir is preserved across job cleanup.
+			$dst = $job->archive_path();
+			@unlink( $dst );
+			if ( ! @symlink( $real, $dst ) ) {
+				if ( ! @copy( $real, $dst ) ) {
+					$job->destroy();
+					wp_send_json_error( array( 'message' => __( 'Could not stage incoming file.', 'migrator' ) ), 500 );
+				}
+			}
+			$source = 'incoming';
+		} else {
+			// Initialize an empty archive file we'll append chunks to.
+			file_put_contents( $job->archive_path(), '' );
+		}
 
-		$raw_url                            = trim( (string) wp_unslash( $_POST['new_url'] ?? '' ) );
-		$job->state['data']['new_url']      = '' !== $raw_url ? untrailingslashit( esc_url_raw( $raw_url ) ) : untrailingslashit( get_site_url() );
+		$raw_url                               = trim( (string) wp_unslash( $_POST['new_url'] ?? '' ) );
+		$job->state['data']['new_url']         = '' !== $raw_url ? untrailingslashit( esc_url_raw( $raw_url ) ) : untrailingslashit( get_site_url() );
 		$job->state['data']['chunks_received'] = 0;
+		$job->state['data']['source']          = $source;
 		$job->save();
 
 		wp_send_json_success(
 			array(
 				'job_id'   => $job->id,
 				'snapshot' => $job->snapshot(),
+				'source'   => $source,
 			)
 		);
 	}

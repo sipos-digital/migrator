@@ -223,9 +223,12 @@
 			e.preventDefault();
 			errorEl.hidden = true;
 
+			const incomingSel = $('#migrator_incoming', form);
+			const incoming = incomingSel ? incomingSel.value : '';
 			const fileInput = $('#migrator_archive', form);
 			const file = fileInput.files[0];
-			if (!file) {
+
+			if (!incoming && !file) {
 				showError(errorEl, cfg.i18n.noFile || 'Please choose an archive to import.');
 				return;
 			}
@@ -239,25 +242,32 @@
 			cancelled = false;
 
 			try {
-				const startData = await postForm('migrator_import_start', { new_url: newUrl });
+				const startData = await postForm('migrator_import_start', {
+					new_url: newUrl,
+					incoming_file: incoming,
+				});
 				activeJobId = startData.job_id;
 
-				// Chunked upload. Chunk size is derived server-side from
-				// PHP's post_max_size / upload_max_filesize so it always fits.
-				const chunkSize = cfg.chunkBytes;
-				const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
-				for (let i = 0; i < totalChunks; i++) {
-					if (cancelled) return;
-					const start = i * chunkSize;
-					const end = Math.min(file.size, start + chunkSize);
-					const slice = file.slice(start, end);
-					const data = await postChunk('migrator_import_upload', {
-						job_id: activeJobId,
-						chunk_index: i,
-						total_chunks: totalChunks,
-					}, slice);
-					setProgress(progressEl, data.snapshot);
+				if (startData.source === 'upload' && file) {
+					// Chunked upload from the browser. Chunk size is derived
+					// server-side and capped to fit nginx client_max_body_size.
+					const chunkSize = cfg.chunkBytes;
+					const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+					for (let i = 0; i < totalChunks; i++) {
+						if (cancelled) return;
+						const start = i * chunkSize;
+						const end = Math.min(file.size, start + chunkSize);
+						const slice = file.slice(start, end);
+						const data = await postChunk('migrator_import_upload', {
+							job_id: activeJobId,
+							chunk_index: i,
+							total_chunks: totalChunks,
+						}, slice);
+						setProgress(progressEl, data.snapshot);
+					}
 				}
+				// For 'incoming' source the archive is already on disk —
+				// skip the chunked upload loop entirely.
 
 				// Step through remaining phases.
 				while (!cancelled) {

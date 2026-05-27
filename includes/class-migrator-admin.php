@@ -22,6 +22,41 @@ class Migrator_Admin {
 
 	public static function activate() {
 		Migrator_Job::base_dir();
+		self::incoming_dir();
+	}
+
+	/**
+	 * Returns (and creates if needed) the directory where users can drop
+	 * pre-uploaded archives via FTP/SCP/Finder to skip the chunked-HTTP-upload
+	 * phase of import. Multi-GB archives via HTTP take minutes; via filesystem,
+	 * they're instant.
+	 */
+	public static function incoming_dir(): string {
+		$dir = Migrator_Job::base_dir() . '/incoming';
+		if ( ! is_dir( $dir ) ) {
+			wp_mkdir_p( $dir );
+			@file_put_contents( $dir . '/.htaccess', "Deny from all\n" );
+		}
+		return $dir;
+	}
+
+	/** @return string[] basenames of zip files in the incoming directory */
+	public static function list_incoming_files(): array {
+		$dir   = self::incoming_dir();
+		$files = glob( $dir . '/*.zip' );
+		if ( false === $files ) {
+			return array();
+		}
+		// Filter out anything we accidentally globbed (just basenames, only .zip)
+		$out = array();
+		foreach ( $files as $f ) {
+			$basename = basename( $f );
+			if ( '' !== $basename && is_file( $f ) ) {
+				$out[] = $basename;
+			}
+		}
+		sort( $out );
+		return $out;
 	}
 
 	public static function deactivate() {
